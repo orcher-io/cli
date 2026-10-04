@@ -28,6 +28,10 @@ python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
 tests/e2e/run.sh target/debug/orcher .venv/bin/python
 ```
 
+It also makes a project with `orcher new` in each language and runs it, so it
+needs python3, Node.js 22 and cargo; set `E2E_LANGUAGES` (for example
+`python typescript`) to check fewer.
+
 It uses ports 50051 and 8080; set `E2E_GRPC_PORT` and `E2E_HTTP_PORT` to use
 others. It deletes the engine and its data when it ends, so do not run it while
 you have a local engine whose workflows you want to keep.

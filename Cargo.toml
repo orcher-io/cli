@@ -62,7 +62,6 @@ cron = "0.12"
 
 dirs = "5"
 handlebars = "4"
-walkdir = "2.4"
 dialoguer = "0.11"
 indicatif = "0.17"
 console = "0.15"

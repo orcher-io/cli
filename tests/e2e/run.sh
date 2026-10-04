@@ -9,6 +9,11 @@
 # Docker and jq, and ports 50051 and 8080 free, or others named in
 # E2E_GRPC_PORT and E2E_HTTP_PORT. It removes the engine and its data when it
 # ends.
+#
+# `orcher new` is checked for the languages in E2E_LANGUAGES (default: python
+# typescript rust), each needing its toolchain: python3, Node.js 22 and npm,
+# or cargo. E2E_PYTHON3 names the Python that makes the project's virtual
+# environment (default: python3).
 
 set -uo pipefail
 
@@ -238,6 +243,53 @@ wait_for "it is sleeping" 30 '.status == "RUNNING"' -- workflow get sleeper-2 -o
 check "terminate" 0 "out:terminated" -- workflow terminate sleeper-2 --force
 check "result of a terminated workflow exits 1" 1 "err:ended TERMINATED" -- workflow result sleeper-2 --timeout 30
 check "cancel a missing workflow fails" 1 - -- workflow cancel no-such-workflow --yes
+
+echo "== new projects"
+# run_in <dir> <name> <command...>: a command other than orcher, checked for
+# exit 0, with its output kept for a failure report.
+run_in() {
+  local dir=$1 name=$2
+  shift 2
+  (cd "$dir" && "$@") >"$WORK/out" 2>"$WORK/err"
+  STATUS=$?
+  if [ "$STATUS" -eq 0 ]; then pass "$name"; else fail "$name"; fi
+}
+for lang in ${E2E_LANGUAGES:-python typescript rust}; do
+  app="e2e-$lang"
+  proj="$WORK/$app"
+  check "new $lang project" 0 "out:$app" -- new "$lang" "$app" --dir "$WORK"
+  case $lang in
+    python)
+      run_in "$proj" "$lang: install" "${E2E_PYTHON3:-python3}" -m venv .venv
+      run_in "$proj" "$lang: install the SDK" .venv/bin/pip install --quiet -r requirements.txt
+      register() { perl -pi -e 's/^(import workflows .*)$/$1\nimport ship_order  # noqa: F401/' worker.py; }
+      worker_cmd=(.venv/bin/python worker.py)
+      ;;
+    typescript)
+      run_in "$proj" "$lang: install" npm install --silent
+      register() { perl -pi -e "s#^(import './workflows';)\$#\$1\nimport './shipOrder';#" src/worker.ts && npm run -s build; }
+      worker_cmd=(node dist/worker.js)
+      ;;
+    rust)
+      run_in "$proj" "$lang: build" cargo build --quiet
+      register() { perl -pi -e 's/^(mod workflows;)$/$1\nmod ship_order;/' src/main.rs && cargo build --quiet; }
+      worker_cmd=(./target/debug/"$app" worker)
+      ;;
+  esac
+  (cd "$proj" && "$ORCHER" test --dry-run) >"$WORK/out" 2>"$WORK/err"; STATUS=$?
+  if [ "$STATUS" -eq 0 ] && grep -q "The project builds" "$WORK/out"; then pass "$lang: orcher test --dry-run"; else fail "$lang: orcher test --dry-run"; fi
+  (cd "$proj" && "$ORCHER" test) >"$WORK/out" 2>"$WORK/err"; STATUS=$?
+  if [ "$STATUS" -eq 0 ] && grep -q "ran end to end" "$WORK/out" && grep -q "Hello, test!" "$WORK/out" "$WORK/err"; then pass "$lang: orcher test runs hello end to end"; else fail "$lang: orcher test runs hello end to end"; fi
+  (cd "$proj" && "$ORCHER" new workflow ship-order -q) >"$WORK/out" 2>"$WORK/err"; STATUS=$?
+  if [ "$STATUS" -eq 0 ]; then pass "$lang: new workflow"; else fail "$lang: new workflow"; fi
+  run_in "$proj" "$lang: register it with the worker" register
+  (cd "$proj" && exec "${worker_cmd[@]}") >"$WORK/$lang-worker.log" 2>&1 &
+  LANG_WORKER=$!
+  check "$lang: the new workflow runs" 0 "out:ship-order handled box-$lang" -- workflow start ship-order --task-queue "$app" --input "\"box-$lang\"" --wait --timeout 90s
+  kill "$LANG_WORKER" 2>/dev/null; wait "$LANG_WORKER" 2>/dev/null
+done
+check "a project needs a valid name" 1 "err:lowercase letter" -- new python 9lives --dir "$WORK"
+check "test outside a project says so" 1 "err:No Python, TypeScript or Rust project" -- test "$WORK"
 
 echo "== restart keeps data"
 kill "$WORKER_PID" 2>/dev/null; WORKER_PID=
