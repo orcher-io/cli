@@ -118,18 +118,26 @@ jobs:
       - name: npm package (npm install / npx)
         if: steps.want.outputs.build == 'true'
         run: |
-          work=$(mktemp -d)
-          tar -xzf target/distrib/orcher-npm-package.tar.gz -C "$work"
-          test "$(node -p "require('$work/package/package.json').name")" = orcher
+          # Node on Windows cannot read Git Bash's /tmp paths, so the package is
+          # unpacked and patched in a directory of the checkout, by relative
+          # path, and the install prefix is given in Windows form there.
+          rm -rf npm-check && mkdir npm-check && cd npm-check
+          tar -xzf ../target/distrib/orcher-npm-package.tar.gz
+          test "$(node -p "require('./package/package.json').name")" = orcher
           node -e '
-            const fs = require("fs"); const p = process.argv[1];
+            const fs = require("fs"); const p = "package/package.json";
             const pkg = JSON.parse(fs.readFileSync(p));
             pkg.artifactDownloadUrls = ["http://127.0.0.1:8765"];
-            fs.writeFileSync(p, JSON.stringify(pkg, null, 2));' "$work/package/package.json"
-          (cd "$work" && tar -czf orcher-local.tgz package)
-          prefix=$(mktemp -d)
-          npm install -g --prefix "$prefix" "$work/orcher-local.tgz"
-          if [ "$RUNNER_OS" = Windows ]; then bin="$prefix/orcher.cmd"; else bin="$prefix/bin/orcher"; fi
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2));'
+          tar -czf orcher-local.tgz package
+          mkdir prefix
+          if [ "$RUNNER_OS" = Windows ]; then
+            npm install -g --prefix "$(cygpath -w "$PWD/prefix")" ./orcher-local.tgz
+            bin=prefix/orcher.cmd
+          else
+            npm install -g --prefix "$PWD/prefix" ./orcher-local.tgz
+            bin=prefix/bin/orcher
+          fi
           "$bin" --version | tee version.txt
           grep -Eq "^orcher [0-9]+\.[0-9]+\.[0-9]+" version.txt
 
