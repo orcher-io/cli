@@ -23,6 +23,15 @@ pub enum Error {
     #[error("{0}")]
     InvalidInput(String),
 
+    /// A workflow ended without completing: failed, canceled, terminated or
+    /// timed out.
+    #[error("workflow '{workflow_id}' ended {status}{}", .error.as_ref().map(|e| format!(": {e}")).unwrap_or_default())]
+    WorkflowDidNotComplete {
+        workflow_id: String,
+        status: String,
+        error: Option<String>,
+    },
+
     /// A local operation failed: reading a file, running Docker, and so on.
     #[error("{0}")]
     Local(String),
