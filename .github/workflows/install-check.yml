@@ -53,7 +53,7 @@ jobs:
         if: matrix.channel == 'npm' || matrix.channel == 'npx'
         with:
           node-version: 24
-      - uses: Homebrew/actions/setup-homebrew@master
+      - uses: Homebrew/actions/setup-homebrew@main
         if: matrix.channel == 'brew' && runner.os == 'Linux'
 
       - name: Install and run
