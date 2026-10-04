@@ -151,6 +151,11 @@ pub(crate) fn non_empty_env(name: &str) -> Option<String> {
 }
 
 impl AuthInterceptor {
+    /// The credential this sends, if any.
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
     /// Give every call that sets no deadline of its own this one.
     pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = Some(timeout);
@@ -318,6 +323,35 @@ impl OrcherGrpcClient {
         timeout: Duration,
     ) -> Result<Self> {
         Self::connect_with_auth(address, namespace, timeout, None).await
+    }
+
+    /// Connect with an explicit token or API key, as `auth login --token`
+    /// does to check one before storing it.
+    pub async fn connect_with_token(address: &str, token: &str) -> Result<Self> {
+        let endpoint = build_untimed_endpoint(address, Duration::from_secs(10), None)?;
+        let channel = endpoint.connect().await.map_err(|e| CliError::Network {
+            message: format!("Failed to connect to orchestrator at {}: {}", address, e),
+            source: None,
+        })?;
+        let interceptor = AuthInterceptor::with_token(token.to_string())
+            .with_default_timeout(DEFAULT_GRPC_TIMEOUT);
+        Ok(Self {
+            workflow_client: WorkflowServiceClient::with_interceptor(
+                channel.clone(),
+                interceptor.clone(),
+            ),
+            query_client: QueryServiceClient::with_interceptor(
+                channel.clone(),
+                interceptor.clone(),
+            ),
+            actor_client: ActorServiceClient::with_interceptor(
+                channel.clone(),
+                interceptor.clone(),
+            ),
+            namespace_client: NamespaceServiceClient::with_interceptor(channel, interceptor),
+            namespace: "default".to_string(),
+            authenticated: true,
+        })
     }
 
     /// Create a new gRPC client with authentication

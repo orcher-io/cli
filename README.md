@@ -105,6 +105,7 @@ Run `orcher <command> --help` for every flag and more examples.
 | `-n`, `--namespace` | `ORCHER_NAMESPACE` | `default` | The namespace to act in |
 | | `ORCHER_API_KEY`, `ORCHER_TOKEN` | the context's stored login | Credentials for an engine that requires them |
 | | `ORCHER_CLOUD_URL` | `https://api.orcher.io` | Where ORCHER Cloud is |
+| | `ORCHER_CREDENTIAL_STORE` | the OS keychain | `file` keeps logins in `credentials` beside the config file (owner-only), as happens anyway where there is no keychain |
 | `-o`, `--output` | | `table` | `table`, `json`, `yaml` or `name` |
 
 The local engine's ports are bound to `127.0.0.1`: it runs without authentication unless its config file turns it on. `orcher dev start` and `orcher server start` take `--engine-version` (default `0.5.5`) to run another engine release, and other ports when the defaults, 50051 and 8080, are taken.

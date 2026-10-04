@@ -36,6 +36,11 @@ It ends by restarting the engine with API-key authentication on
 (`tests/e2e/auth-engine.toml`), seeding a key in its database, and checking
 the CLI is refused without it and works with it.
 
+What only an ORCHER Cloud gateway serves (login, the device flow, token
+refresh, batch operations, log streaming) cannot run against the engine image,
+so unit tests run it against a stand-in HTTP server instead
+([mockito](https://docs.rs/mockito)).
+
 It uses ports 50051 and 8080; set `E2E_GRPC_PORT` and `E2E_HTTP_PORT` to use
 others. It deletes the engine and its data when it ends, so do not run it while
 you have a local engine whose workflows you want to keep.
