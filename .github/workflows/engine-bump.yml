@@ -1,0 +1,83 @@
+name: Engine version
+
+# Keeps the engine release `orcher dev start` and `orcher server start` run by
+# default (DEFAULT_ENGINE_VERSION in src/local_engine.rs) at the newest one
+# published. Weekly, and by hand: reads the tags of ghcr.io/orcher-io/orcher,
+# which is public, so no credentials are needed; when a newer X.Y.Z exists it
+# opens (or updates) a pull request moving the default to it, and starts CI on
+# that branch, whose e2e job runs every command against the new image.
+#
+# A pull request opened with GITHUB_TOKEN starts no pull_request workflows, so
+# CI is started on the branch with a workflow_dispatch, which it may; its
+# checks show on the pull request's commit.
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: engine-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: chore/engine-version
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the newest engine release
+        id: versions
+        run: |
+          set -euo pipefail
+          token=$(curl -fsS "https://ghcr.io/token?scope=repository:orcher-io/orcher:pull" | jq -r .token)
+          latest=$(curl -fsS -H "Authorization: Bearer $token" \
+              "https://ghcr.io/v2/orcher-io/orcher/tags/list?n=10000" |
+            jq -r '.tags[]' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          current=$(sed -n 's/^pub const DEFAULT_ENGINE_VERSION: &str = "\(.*\)";/\1/p' src/local_engine.rs)
+          if [ -z "$latest" ] || [ -z "$current" ]; then
+            echo "::error::could not read the versions (latest '$latest', current '$current')"
+            exit 1
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "Newest engine $latest; the CLI runs $current by default."
+
+      - name: Open a pull request moving the default
+        if: steps.versions.outputs.latest != steps.versions.outputs.current
+        env:
+          LATEST: ${{ steps.versions.outputs.latest }}
+          CURRENT: ${{ steps.versions.outputs.current }}
+        run: |
+          set -euo pipefail
+          # Only ever moves forward.
+          if [ "$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)" != "$LATEST" ]; then
+            echo "The default $CURRENT is newer than any published tag; nothing to do."
+            exit 0
+          fi
+          git switch -C "$BRANCH"
+          sed -i "s/^pub const DEFAULT_ENGINE_VERSION: &str = \"$CURRENT\";/pub const DEFAULT_ENGINE_VERSION: \&str = \"$LATEST\";/" src/local_engine.rs
+          sed -i "s/\`--engine-version\` (default \`$CURRENT\`)/\`--engine-version\` (default \`$LATEST\`)/" README.md
+          git diff --stat
+          git diff --quiet && { echo "::error::nothing changed"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: run engine $LATEST by default"
+          git push --force origin "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore: run engine $LATEST by default" \
+              --body "Engine $LATEST is published as ghcr.io/orcher-io/orcher:$LATEST; this moves the default of \`orcher dev start\` and \`orcher server start\` from $CURRENT to it. CI runs the e2e against the new image."
+          else
+            gh pr edit "$BRANCH" --title "chore: run engine $LATEST by default"
+          fi
+          gh workflow run ci.yml --ref "$BRANCH"

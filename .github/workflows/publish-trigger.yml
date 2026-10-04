@@ -1,0 +1,26 @@
+name: Start publishing
+
+# Called by release.yml (dist) after the release's files are uploaded and the
+# release is announced. Starts publish.yml for the tag. Publishing runs there,
+# in a workflow of its own, because the registries' trusted publishing
+# identifies the workflow that runs at the top, and a job called from
+# release.yml would be identified as release.yml.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+        run: gh workflow run publish.yml --ref "$TAG" -f tag="$TAG"

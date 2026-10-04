@@ -7,6 +7,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # For pull requests opened by a workflow (the engine version bump), whose
+  # pull_request events start nothing.
+  workflow_dispatch:
 
 permissions:
   contents: read

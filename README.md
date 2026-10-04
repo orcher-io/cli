@@ -30,11 +30,28 @@
 
 ### <img height="16" src="https://octicons-col.vercel.app/download/38BDF0"> Install
 
-Build it from source with a stable Rust toolchain:
+macOS and Linux:
 
 ```bash
-cargo install --git https://github.com/orcher-io/cli
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/orcher-io/cli/releases/latest/download/orcher-installer.sh | sh
 ```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/orcher-io/cli/releases/latest/download/orcher-installer.ps1 | iex"
+```
+
+Or with a package manager:
+
+| | |
+|---|---|
+| Homebrew | `brew install orcher-io/tap/orcher` |
+| Cargo | `cargo install orcher` |
+| pip | `pip install orcher`, or run it without installing: `uvx orcher` |
+| npm | `npm install -g orcher`, or run it without installing: `npx orcher` |
+
+Every release has binaries for macOS (Apple silicon and Intel), Linux (x86_64 and arm64, glibc and musl) and Windows (x86_64) on its [release page](https://github.com/orcher-io/cli/releases), with checksums.
 
 > [!NOTE]
 > The CLI is pre-1.0: commands and flags may change between minor releases, and each release's notes list what changed.

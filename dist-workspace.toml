@@ -1,0 +1,29 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.33.0"
+ci = "github"
+installers = ["shell", "powershell", "npm", "homebrew"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-musl",
+  "x86_64-pc-windows-msvc",
+]
+tap = "orcher-io/homebrew-tap"
+formula = "orcher"
+npm-package = "orcher"
+post-announce-jobs = ["./publish-trigger"]
+install-path = "CARGO_HOME"
+install-updater = false
+dispatch-releases = true
+pr-run-mode = "plan"
+create-release = false
+github-attestations = true
+
+[dist.github-custom-job-permissions]
+"publish-trigger" = { actions = "write" }

@@ -1,0 +1,36 @@
+# The PyPI package `orcher`: the CLI binary in a wheel, so that
+# `pip install orcher` or `uvx orcher` puts an `orcher` executable on PATH.
+# maturin builds the Rust binary (bindings = "bin") and takes the version from
+# Cargo.toml, so release-please only bumps Cargo.toml.
+
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "orcher"
+description = "The ORCHER command-line interface: run an engine, start and inspect workflows, on your machine or in ORCHER Cloud"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.8"
+dynamic = ["version"]
+keywords = ["orcher", "workflow", "durable-execution", "cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Rust",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/orcher-io"
+Repository = "https://github.com/orcher-io/cli"
+Issues = "https://github.com/orcher-io/cli/issues"
+
+[tool.maturin]
+bindings = "bin"
+strip = true

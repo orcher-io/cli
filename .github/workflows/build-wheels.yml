@@ -1,0 +1,165 @@
+name: Build wheels
+
+# Builds the PyPI package `orcher`: one wheel per platform with the CLI binary
+# in it (maturin, bindings = "bin"), and the sdist. Each wheel is installed and
+# run before it is kept: `pip install` must put a working `orcher` on PATH.
+# Called by publish.yml for a release and by release-check.yml on pull
+# requests, which builds the Linux x86_64 wheels only unless asked for all.
+#
+# Platforms, each built on a runner of its own architecture, so nothing runs
+# under emulation:
+#   - Linux x86_64 and aarch64, glibc (manylinux 2.17) and musl (musllinux 1.2)
+#   - macOS arm64, and x86_64 cross-compiled on arm64 (checked for its
+#     architecture rather than run)
+#   - Windows x86_64
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit or tag to build
+        required: true
+        type: string
+      all-platforms:
+        description: Every platform, rather than Linux x86_64 only
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: wheel (linux ${{ matrix.target }} ${{ matrix.libc }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64, runner: ubuntu-latest, libc: glibc, compat: manylinux2014, image: slim, everywhere: false }
+          - { target: x86_64, runner: ubuntu-latest, libc: musl, compat: musllinux_1_2, image: alpine, everywhere: false }
+          - { target: aarch64, runner: ubuntu-24.04-arm, libc: glibc, compat: manylinux2014, image: slim, everywhere: true }
+          - { target: aarch64, runner: ubuntu-24.04-arm, libc: musl, compat: musllinux_1_2, image: alpine, everywhere: true }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Skip unless every platform is wanted
+        id: want
+        run: echo "build=${{ inputs.all-platforms || !matrix.everywhere }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.build == 'true'
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: PyO3/maturin-action@v1
+        if: steps.want.outputs.build == 'true'
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.compat }}
+          args: --release --out dist
+      # On the oldest and newest Python the package supports, in a container
+      # of the wheel's libc.
+      - name: Install and run
+        if: steps.want.outputs.build == 'true'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          for py in 3.8 3.14; do
+            docker run --rm -v "$PWD/dist:/dist:ro" "python:$py-$IMAGE" sh -ec '
+              pip install --quiet --disable-pip-version-check --root-user-action=ignore /dist/*.whl
+              cd / && orcher --version | grep -E "^orcher [0-9]+\.[0-9]+\.[0-9]+"'
+          done
+      - uses: astral-sh/setup-uv@v6
+        if: steps.want.outputs.build == 'true' && matrix.libc == 'glibc'
+      - name: Run it with uvx
+        if: steps.want.outputs.build == 'true' && matrix.libc == 'glibc'
+        run: uvx --from "$(ls dist/*.whl)" orcher --version | grep -E "^orcher [0-9]+\.[0-9]+\.[0-9]+"
+      - uses: actions/upload-artifact@v4
+        if: steps.want.outputs.build == 'true'
+        with:
+          name: wheel-linux-${{ matrix.target }}-${{ matrix.libc }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  macos:
+    name: wheel (macos ${{ matrix.target }})
+    if: inputs.all-platforms
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64, x86_64]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - name: Install and run
+        if: matrix.target == 'aarch64'
+        run: |
+          python -m venv "$RUNNER_TEMP/v"
+          "$RUNNER_TEMP/v/bin/pip" install --quiet dist/*.whl
+          "$RUNNER_TEMP/v/bin/orcher" --version | grep -E "^orcher [0-9]+\.[0-9]+\.[0-9]+"
+      - name: Check the architecture
+        if: matrix.target == 'x86_64'
+        run: |
+          python -m zipfile -e dist/*.whl "$RUNNER_TEMP/wheel"
+          test "$(lipo -archs "$RUNNER_TEMP"/wheel/*.data/scripts/orcher)" = x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-macos-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  windows:
+    name: wheel (windows x86_64)
+    if: inputs.all-platforms
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x64
+          args: --release --out dist
+      - name: Install and run
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/v"
+          "$RUNNER_TEMP/v/Scripts/pip" install --quiet dist/*.whl
+          "$RUNNER_TEMP/v/Scripts/orcher.exe" --version | grep -E "^orcher [0-9]+\.[0-9]+\.[0-9]+"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-x86_64
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      # The sdist must build into a working wheel on its own.
+      - name: Build from the sdist and run
+        run: |
+          python3 -m venv "$RUNNER_TEMP/v"
+          "$RUNNER_TEMP/v/bin/pip" install --quiet dist/*.tar.gz
+          "$RUNNER_TEMP/v/bin/orcher" --version | grep -E "^orcher [0-9]+\.[0-9]+\.[0-9]+"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
