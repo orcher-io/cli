@@ -1,9 +1,7 @@
 //! Implementation of the 'auth' command for managing authentication
 
 use crate::client::auth::{AuthManager, LoginRequest};
-use crate::client::config::ClientConfig;
 use crate::client::device_flow::{DeviceFlowAuthenticator, DeviceTokenResponse};
-use crate::client::{AuthProvider, OrcherClient};
 use crate::config::{AuthConfig, AuthType, Config, Context};
 use crate::error::{CliError, Result};
 
@@ -48,23 +46,10 @@ async fn login(
     global_config: &GlobalConfig,
 ) -> Result<()> {
     let config = load_or_create_config()?;
-
-    // Determine server URL
-    let server_url = if let Some(server) = server {
-        Url::parse(server).map_err(|e| CliError::Config {
-            message: format!("Invalid server URL '{}': {}", server, e),
-            source: Some(Box::new(e)),
-        })?
-    } else {
-        let current_context = config
-            .contexts
-            .get(&config.current_context)
-            .ok_or_else(|| CliError::NoCurrentContext)?;
-        Url::parse(&current_context.server).map_err(|e| CliError::Config {
-            message: format!("Invalid server URL in context: {}", e),
-            source: Some(Box::new(e)),
-        })?
-    };
+    let server_url = login_url(server, &config)?;
+    if !global_config.quiet {
+        println!("Logging in to {}", server_url);
+    }
 
     if use_device {
         // Device flow authentication (for CLI/headless)
@@ -77,6 +62,25 @@ async fn login(
         // Username/password authentication
         login_with_credentials(&server_url, username, global_config).await
     }
+}
+
+/// Where to log in: `--server`, else the current context's gateway, else its
+/// server when that is a remote (`https://`) one, else ORCHER Cloud.
+fn login_url(server: Option<&str>, config: &Config) -> Result<Url> {
+    let current = config.contexts.get(&config.current_context);
+    let chosen = server
+        .map(str::to_string)
+        .or_else(|| current.and_then(|c| c.api.clone()))
+        .or_else(|| {
+            current
+                .map(|c| c.server.clone())
+                .filter(|s| s.starts_with("https://"))
+        })
+        .unwrap_or_else(crate::constants::cloud_url);
+    Url::parse(&chosen).map_err(|e| CliError::Config {
+        message: format!("Invalid server URL '{}': {}", chosen, e),
+        source: Some(Box::new(e)),
+    })
 }
 
 /// Login with device flow (OAuth 2.0 Device Authorization Grant)
@@ -204,43 +208,48 @@ async fn login_with_device_flow(
     }
 }
 
-/// Login with token authentication
-async fn login_with_token(server_url: &Url, _global_config: &GlobalConfig) -> Result<()> {
-    let token: String = Input::new()
-        .with_prompt("Enter authentication token")
-        .interact_text()
-        .map_err(|e| CliError::Config {
-            message: format!("Failed to read token: {}", e),
-            source: Some(Box::new(e)),
+/// Login with a token: an access token, or an engine API key. It is checked
+/// by making an authenticated call to the engine at `server_url`, then
+/// stored for the context.
+async fn login_with_token(server_url: &Url, global_config: &GlobalConfig) -> Result<()> {
+    use std::io::IsTerminal;
+    let token: String = if std::io::stdin().is_terminal() {
+        Password::new()
+            .with_prompt("Token or API key")
+            .interact()
+            .map_err(|e| CliError::Config {
+                message: format!("Failed to read token: {}", e),
+                source: Some(Box::new(e)),
+            })?
+    } else {
+        // Piped in, as in `echo "$KEY" | orcher auth login --token`.
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        line.trim().to_string()
+    };
+    if token.is_empty() {
+        return Err(CliError::invalid_input("No token given"));
+    }
+
+    // An authenticated call shows the token is accepted.
+    let mut client = crate::client::grpc_client::OrcherGrpcClient::connect_with_token(
+        server_url.as_str(),
+        &token,
+    )
+    .await?;
+    client
+        .list_namespaces(1, 0)
+        .await
+        .map_err(|e| CliError::Auth {
+            message: format!("The server did not accept the token: {}", e),
+            error_code: None,
         })?;
 
-    // Validate token by making a test request
-    let client_config = ClientConfig::new(server_url.clone());
-    let client = OrcherClient::new(client_config)?;
-
-    let auth = AuthProvider::Token(crate::client::auth::TokenAuth::new(
-        token.clone(),
-        None, // No refresh token
-        None, // No expiration
-        server_url.clone(),
-    ));
-
-    let client = client.with_auth(auth);
-
-    // Test the authentication
-    match client.health_check().await {
-        Ok(_) => {
-            println!("✓ Authentication successful");
-
-            // Save token to configuration
-            save_token_to_config(&token, server_url)?;
-            Ok(())
-        }
-        Err(e) => Err(CliError::Auth {
-            message: format!("Authentication failed: {}", e),
-            error_code: None,
-        }),
+    let context_name = save_token_to_config(&token, server_url)?;
+    if !global_config.quiet {
+        println!("✓ Logged in; using context '{}'", context_name);
     }
+    Ok(())
 }
 
 /// Login with username and password
@@ -447,7 +456,7 @@ fn save_device_tokens_to_config(
 }
 
 /// Save token authentication to configuration and secure storage
-fn save_token_to_config(token: &str, server_url: &Url) -> Result<()> {
+fn save_token_to_config(token: &str, server_url: &Url) -> Result<String> {
     let mut config = load_or_create_config()?;
 
     // Find or create context for this server
@@ -468,7 +477,7 @@ fn save_token_to_config(token: &str, server_url: &Url) -> Result<()> {
     let storage = crate::secure_storage::SecureStorage::new(&context_name)?;
     storage.store_token(token)?;
 
-    Ok(())
+    Ok(context_name)
 }
 
 /// Save credentials to configuration and secure storage
@@ -502,36 +511,47 @@ fn save_credentials_to_config(
     Ok(())
 }
 
-/// Find existing context for server or create a new one
+/// Find the context for a server, or create one, and make it current: a
+/// login is to the server that commands should go to next. The context for
+/// ORCHER Cloud is named `cloud`.
 fn find_or_create_context_for_server(config: &mut Config, server_url: &Url) -> Result<String> {
-    // Normalize the incoming URL (remove trailing slash for comparison)
     let normalized_url = server_url.as_str().trim_end_matches('/');
 
-    // Try to find existing context with same server
-    for (name, context) in &config.contexts {
-        let normalized_context_server = context.server.trim_end_matches('/');
-        if normalized_context_server == normalized_url {
-            return Ok(name.clone());
+    let existing = config.contexts.iter().find(|(_, context)| {
+        context.server.trim_end_matches('/') == normalized_url
+            || context
+                .api
+                .as_deref()
+                .is_some_and(|api| api.trim_end_matches('/') == normalized_url)
+    });
+    let context_name = match existing {
+        Some((name, _)) => name.clone(),
+        None => {
+            let name = if normalized_url == crate::constants::cloud_url() {
+                "cloud".to_string()
+            } else {
+                format!("auto-{}", server_url.host_str().unwrap_or("unknown"))
+            };
+            // One address serves both the gateway and the engine, as ORCHER
+            // Cloud does; `config set-context` can split them.
+            let context = Context {
+                server: normalized_url.to_string(),
+                api: Some(normalized_url.to_string()),
+                auth: AuthConfig {
+                    auth_type: AuthType::None,
+                    token_ref: None,
+                    apikey_ref: None,
+                    username: None,
+                },
+                tls: None,
+                timeout: None,
+                namespace: None,
+            };
+            config.contexts.insert(name.clone(), context);
+            name
         }
-    }
-
-    // Create new context
-    let context_name = format!("auto-{}", server_url.host_str().unwrap_or("unknown"));
-    let context = Context {
-        server: server_url.to_string(),
-        api: None,
-        auth: AuthConfig {
-            auth_type: AuthType::None,
-            token_ref: None,
-            apikey_ref: None,
-            username: None,
-        },
-        tls: None,
-        timeout: None,
-        namespace: None,
     };
-
-    config.contexts.insert(context_name.clone(), context);
+    config.current_context = context_name.clone();
     Ok(context_name)
 }
 
@@ -556,7 +576,8 @@ async fn get_user_info_from_server(context: &Context) -> Result<String> {
 /// Fetch user information from API
 async fn fetch_user_info_from_api(context: &Context, token: &str) -> Result<String> {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/v1/auth/me", context.server.trim_end_matches('/'));
+    let gateway = context.api.as_deref().unwrap_or(&context.server);
+    let url = format!("{}/api/v1/auth/me", gateway.trim_end_matches('/'));
 
     match client
         .get(&url)
@@ -598,5 +619,107 @@ fn load_or_create_config() -> Result<Config> {
             config.save()?;
             Ok(config)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context(server: &str, api: Option<&str>) -> Context {
+        Context {
+            server: server.to_string(),
+            api: api.map(str::to_string),
+            auth: AuthConfig {
+                auth_type: AuthType::None,
+                token_ref: None,
+                apikey_ref: None,
+                username: None,
+            },
+            tls: None,
+            timeout: None,
+            namespace: None,
+        }
+    }
+
+    fn config_with(name: &str, ctx: Context) -> Config {
+        let mut config = Config::default();
+        config.contexts.insert(name.to_string(), ctx);
+        config.current_context = name.to_string();
+        config
+    }
+
+    /// A login goes to --server, else the context's gateway, else a remote
+    /// context server, else ORCHER Cloud; never to a local gRPC port, which
+    /// the earlier version joined login paths onto.
+    #[test]
+    fn login_goes_to_the_gateway() {
+        let local = config_with("local", context("http://localhost:50051", None));
+        assert_eq!(
+            login_url(None, &local)
+                .unwrap()
+                .as_str()
+                .trim_end_matches('/'),
+            crate::constants::cloud_url()
+        );
+        assert_eq!(
+            login_url(Some("https://gw.example.com"), &local)
+                .unwrap()
+                .as_str(),
+            "https://gw.example.com/"
+        );
+        let split = config_with(
+            "prod",
+            context("https://engine.example.com", Some("https://gw.example.com")),
+        );
+        assert_eq!(
+            login_url(None, &split).unwrap().as_str(),
+            "https://gw.example.com/"
+        );
+        let remote = config_with("prod", context("https://engine.example.com", None));
+        assert_eq!(
+            login_url(None, &remote).unwrap().as_str(),
+            "https://engine.example.com/"
+        );
+    }
+
+    /// Logging in makes the context current, so the next command goes there.
+    #[test]
+    fn logging_in_switches_to_the_servers_context() {
+        let mut config = config_with("local", context("http://localhost:50051", None));
+        let cloud: Url = crate::constants::cloud_url().parse().unwrap();
+        let name = find_or_create_context_for_server(&mut config, &cloud).unwrap();
+        assert_eq!(name, "cloud");
+        assert_eq!(config.current_context, "cloud");
+        let ctx = &config.contexts["cloud"];
+        assert_eq!(
+            ctx.api.as_deref(),
+            Some(crate::constants::cloud_url().as_str())
+        );
+
+        // A second login to the same server reuses the context.
+        config.current_context = "local".into();
+        let again = find_or_create_context_for_server(&mut config, &cloud).unwrap();
+        assert_eq!(again, "cloud");
+        assert_eq!(config.contexts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_user_is_read_from_the_gateway() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/auth/me")
+            .match_header("authorization", "Bearer jwt-1")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id":"u1","email":"ada@example.com","roles":[],"mfaEnabled":false}"#)
+            .create_async()
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(crate::constants::CONFIG_FILE_ENV, dir.path().join("c.yaml"));
+        let ctx = context("https://engine.example.com", Some(&server.url()));
+        let user = fetch_user_info_from_api(&ctx, "jwt-1").await;
+        std::env::remove_var(crate::constants::CONFIG_FILE_ENV);
+        assert_eq!(user.unwrap(), "ada@example.com");
+        mock.assert_async().await;
     }
 }

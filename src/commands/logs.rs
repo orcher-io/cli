@@ -630,7 +630,7 @@ async fn get_logs_http(
         }
     };
 
-    let mut request = client.get(&url);
+    let mut request = crate::client::with_gateway_auth(client.get(&url), global_config);
 
     // Add query parameters
     if logs_config.tail > 0 {
@@ -817,7 +817,8 @@ async fn follow_logs_sse(
 
     // Create SSE client
     let client = reqwest::Client::new();
-    let mut event_source = EventSource::new(client.get(&url)).map_err(|e| CliError::Network {
+    let request = crate::client::with_gateway_auth(client.get(&url), global_config);
+    let mut event_source = EventSource::new(request).map_err(|e| CliError::Network {
         message: format!("Failed to create SSE connection: {}", e),
         source: None,
     })?;
@@ -1103,6 +1104,45 @@ fn parse_resource_identifier(resource: &str) -> Result<(String, String, Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With a gateway, --follow reads its server-sent event stream, with the
+    /// credential, until the stream says it is complete.
+    #[tokio::test]
+    async fn follow_reads_the_gateways_event_stream() {
+        let mut server = mockito::Server::new_async().await;
+        let body = concat!(
+            "data: {\"timestamp\":\"2026-10-04T12:00:00Z\",\"level\":\"INFO\",\"message\":\"started\",\"source\":\"engine\"}\n\n",
+            "data: {\"type\":\"stream_complete\",\"execution_id\":\"e1\"}\n\n",
+        );
+        let mock = server
+            .mock("GET", "/api/v1/executions/e1/logs/stream")
+            .match_query(mockito::Matcher::Any)
+            .match_header("authorization", "Bearer token-1")
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create_async()
+            .await;
+        let manager = ConnectionManager::new("http://localhost:1", &server.url(), "default");
+        let global_config = GlobalConfig {
+            quiet: true,
+            ..Default::default()
+        };
+        std::env::set_var("ORCHER_TOKEN", "token-1");
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            follow_logs_sse(
+                &manager,
+                "execution",
+                "e1",
+                &LogsConfig::default(),
+                &global_config,
+            ),
+        )
+        .await;
+        std::env::remove_var("ORCHER_TOKEN");
+        result.expect("the stream ends").unwrap();
+        mock.assert_async().await;
+    }
 
     #[test]
     fn test_parse_resource_identifier() {

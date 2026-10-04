@@ -136,25 +136,26 @@ impl TokenAuth {
         }
     }
 
-    /// Refresh the access token using the refresh token
-    pub async fn refresh(&self) -> Result<()> {
+    /// Exchange the refresh token for a new access token, keeping both the
+    /// new access token and, when the server rotates it, the new refresh
+    /// token.
+    pub async fn refresh(&mut self) -> Result<()> {
         let refresh_token = self
             .refresh_token
             .as_ref()
             .ok_or(CliError::NoRefreshToken)?;
 
         let client = Client::new();
-        let refresh_url = self
-            .server
-            .join("/auth/refresh")
-            .map_err(|e| CliError::Config {
-                message: format!("Invalid server URL: {}", e),
-                source: Some(Box::new(e)),
-            })?;
+        let refresh_url =
+            self.server
+                .join("/api/v1/auth/refresh")
+                .map_err(|e| CliError::Config {
+                    message: format!("Invalid server URL: {}", e),
+                    source: Some(Box::new(e)),
+                })?;
 
         let request = RefreshTokenRequest {
             refresh_token: refresh_token.clone(),
-            grant_type: "refresh_token".to_string(),
         };
 
         let response = client
@@ -177,15 +178,18 @@ impl TokenAuth {
             });
         }
 
-        let _refresh_response: RefreshTokenResponse =
+        let refreshed: RefreshTokenResponse =
             response.json().await.map_err(|e| CliError::Config {
                 message: format!("Invalid refresh response: {}", e),
                 source: Some(Box::new(e)),
             })?;
 
-        // In a real implementation, this would update the stored credentials
-        // For now, we just log the successful refresh
-        tracing::info!("Token refreshed successfully");
+        self.access_token = refreshed.access_token;
+        if let Some(rotated) = refreshed.refresh_token {
+            self.refresh_token = Some(rotated);
+        }
+        self.expires_at = expiry(refreshed.expires_at, refreshed.expires_in);
+        tracing::debug!("Token refreshed");
         Ok(())
     }
 }
@@ -241,40 +245,63 @@ impl BasicAuth {
     }
 }
 
-/// Request for refreshing an access token
+/// Request for refreshing an access token (`POST /api/v1/auth/refresh`)
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RefreshTokenRequest {
     refresh_token: String,
-    grant_type: String,
 }
 
-/// Response from token refresh endpoint
+/// Response from the token refresh endpoint. The gateway answers in
+/// camelCase with an absolute `expiresAt`; snake_case and a relative
+/// `expires_in` are accepted too.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct RefreshTokenResponse {
+    #[serde(alias = "accessToken")]
     access_token: String,
-    token_type: String,
-    expires_in: Option<i64>,
+    #[serde(default, alias = "refreshToken")]
     refresh_token: Option<String>,
-    scope: Option<String>,
+    #[serde(default, alias = "expiresAt")]
+    expires_at: Option<i64>,
+    #[serde(default, alias = "expiresIn")]
+    expires_in: Option<i64>,
 }
 
-/// Login request for obtaining initial tokens
+/// When a token expires, from an absolute Unix time or a lifetime in seconds.
+fn expiry(expires_at: Option<i64>, expires_in: Option<i64>) -> Option<Timestamptz> {
+    match (expires_at, expires_in) {
+        (Some(at), _) => Timestamptz::from_second(at),
+        (None, Some(secs)) => Some(Timestamptz::now() + jiff::SignedDuration::from_secs(secs)),
+        (None, None) => None,
+    }
+}
+
+/// Login request for obtaining initial tokens (`POST /api/v1/auth/login`).
+/// The gateway takes the username or email as `identifier`.
 #[derive(Debug, Serialize)]
 pub struct LoginRequest {
+    #[serde(rename = "identifier")]
     pub username: String,
     pub password: String,
+    /// Not sent: the gateway grants scopes by role.
+    #[serde(skip)]
     pub scopes: Vec<String>,
 }
 
-/// Login response containing tokens
+/// Login response containing tokens. The gateway answers in camelCase with
+/// an absolute `expiresAt`; snake_case and `expires_in` are accepted too.
 #[derive(Debug, Deserialize)]
 pub struct LoginResponse {
+    #[serde(alias = "accessToken")]
     pub access_token: String,
-    pub token_type: String,
+    #[serde(default, alias = "tokenType")]
+    pub token_type: Option<String>,
+    #[serde(default, alias = "expiresIn")]
     pub expires_in: Option<i64>,
+    #[serde(default, alias = "expiresAt")]
+    pub expires_at: Option<i64>,
+    #[serde(default, alias = "refreshToken")]
     pub refresh_token: Option<String>,
-    pub scope: Option<String>,
 }
 
 /// API key creation request
@@ -321,10 +348,12 @@ impl AuthManager {
 
     /// Perform login with username/password
     pub async fn login(&self, server: &Url, request: LoginRequest) -> Result<TokenAuth> {
-        let login_url = server.join("/auth/login").map_err(|e| CliError::Config {
-            message: format!("Invalid server URL: {}", e),
-            source: Some(Box::new(e)),
-        })?;
+        let login_url = server
+            .join("/api/v1/auth/login")
+            .map_err(|e| CliError::Config {
+                message: format!("Invalid server URL: {}", e),
+                source: Some(Box::new(e)),
+            })?;
 
         let response = self
             .client
@@ -352,9 +381,7 @@ impl AuthManager {
                 source: Some(Box::new(e)),
             })?;
 
-        let expires_at = login_response
-            .expires_in
-            .map(|expires_in| Timestamptz::now() + jiff::SignedDuration::from_secs(expires_in));
+        let expires_at = expiry(login_response.expires_at, login_response.expires_in);
 
         Ok(TokenAuth::new(
             login_response.access_token,
@@ -547,6 +574,100 @@ mod tests {
         assert!(api_key.has_scope("read"));
         assert!(api_key.has_scope("write"));
         assert!(!api_key.has_scope("admin"));
+    }
+
+    /// Login speaks the gateway's API: `identifier` and `password` in,
+    /// camelCase tokens and an absolute expiry out.
+    #[tokio::test]
+    async fn login_uses_the_gateway_contract() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/auth/login")
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "identifier": "ada@example.com",
+                "password": "secret"
+            })))
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"accessToken":"jwt-1","refreshToken":"r-1","tokenType":"Bearer",
+                    "expiresAt":4102444800,"sessionId":"s","user":{"id":"u","email":"ada@example.com"}}"#,
+            )
+            .create_async()
+            .await;
+
+        let auth = AuthManager::new()
+            .login(
+                &server.url().parse().unwrap(),
+                LoginRequest {
+                    username: "ada@example.com".into(),
+                    password: "secret".into(),
+                    scopes: vec!["read".into()],
+                },
+            )
+            .await
+            .unwrap();
+        mock.assert_async().await;
+        assert_eq!(auth.access_token, "jwt-1");
+        assert_eq!(auth.refresh_token.as_deref(), Some("r-1"));
+        assert_eq!(auth.expires_at, Timestamptz::from_second(4_102_444_800));
+    }
+
+    #[tokio::test]
+    async fn a_refused_login_is_an_auth_error() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/v1/auth/login")
+            .with_status(401)
+            .with_body(r#"{"error":"invalid credentials"}"#)
+            .create_async()
+            .await;
+        let err = AuthManager::new()
+            .login(
+                &server.url().parse().unwrap(),
+                LoginRequest {
+                    username: "ada".into(),
+                    password: "wrong".into(),
+                    scopes: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Auth { .. }), "{err:?}");
+    }
+
+    /// A refresh keeps what it gets back: the new access token, and the new
+    /// refresh token when the gateway rotates it. (It used to discard both.)
+    #[tokio::test]
+    async fn refresh_keeps_the_new_tokens() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/auth/refresh")
+            .match_body(mockito::Matcher::Json(
+                serde_json::json!({"refreshToken": "r-1"}),
+            ))
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"accessToken":"jwt-2","refreshToken":"r-2","tokenType":"Bearer","expiresAt":4102444800}"#)
+            .create_async()
+            .await;
+
+        let mut auth = TokenAuth::new(
+            "jwt-1".into(),
+            Some("r-1".into()),
+            None,
+            server.url().parse().unwrap(),
+        );
+        auth.refresh().await.unwrap();
+        mock.assert_async().await;
+        assert_eq!(auth.access_token, "jwt-2");
+        assert_eq!(auth.refresh_token.as_deref(), Some("r-2"));
+        assert!(auth.expires_at.is_some());
+
+        assert!(AuthProvider::Token(auth).supports_refresh());
+        let mut none = AuthProvider::None;
+        assert!(matches!(
+            none.refresh_token().await,
+            Err(CliError::RefreshNotSupported)
+        ));
     }
 
     #[tokio::test]

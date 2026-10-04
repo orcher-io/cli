@@ -448,6 +448,60 @@ impl DeviceFlowAuthenticator {
 mod tests {
     use super::*;
 
+    /// The device flow's two calls, against a stand-in gateway: a code to
+    /// show the user, then polling until the login is approved.
+    #[tokio::test]
+    async fn device_flow_requests_a_code_and_polls_for_the_token() {
+        let mut server = mockito::Server::new_async().await;
+        let code = server
+            .mock("POST", "/api/v1/auth/oauth/device/code")
+            .match_body(mockito::Matcher::Json(serde_json::json!({"provider": "github"})))
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"deviceCode":"dc-1","userCode":"WDJB-MJHT","verificationUri":"https://example.com/device","verificationUriComplete":null,"expiresIn":600,"interval":5}"#)
+            .create_async()
+            .await;
+        let pending = server
+            .mock("POST", "/api/v1/auth/oauth/device/token")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"deviceCode": "dc-1"}),
+            ))
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"pending","interval":5}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let flow = DeviceFlowAuthenticator::new(server.url().parse().unwrap());
+        let response = flow.request_device_code("github").await.unwrap();
+        assert_eq!(response.user_code, "WDJB-MJHT");
+        assert!(matches!(
+            flow.poll_once("github", &response.device_code)
+                .await
+                .unwrap(),
+            DeviceTokenResponse::Pending { interval: 5 }
+        ));
+        code.assert_async().await;
+        pending.assert_async().await;
+
+        pending.remove_async().await;
+        server
+            .mock("POST", "/api/v1/auth/oauth/device/token")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"success","accessToken":"jwt","refreshToken":"r","tokenType":"Bearer","expiresIn":3600,
+                "user":{"id":"u1","email":"ada@example.com","name":"Ada","isNew":false,"oauthProvider":"github"}}"#)
+            .create_async()
+            .await;
+        match flow.poll_once("github", "dc-1").await.unwrap() {
+            DeviceTokenResponse::Success {
+                access_token, user, ..
+            } => {
+                assert_eq!(access_token, "jwt");
+                assert_eq!(user.email, "ada@example.com");
+            }
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_device_code_request_serialization() {
         let request = DeviceCodeRequest {

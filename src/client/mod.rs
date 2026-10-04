@@ -50,6 +50,21 @@ pub struct ApiError {
 }
 
 /// Convert HTTP status codes to appropriate CLI errors
+/// Sends the credential the gRPC client would (ORCHER_TOKEN, ORCHER_API_KEY,
+/// or the context's stored login) with a request to a gateway, which checks
+/// it like the engine does.
+pub fn with_gateway_auth(
+    request: reqwest::RequestBuilder,
+    global_config: &crate::utils::GlobalConfig,
+) -> reqwest::RequestBuilder {
+    match grpc_client::AuthInterceptor::from_env_and_storage(global_config.context.as_deref())
+        .token()
+    {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    }
+}
+
 pub fn status_to_error(status: StatusCode, message: String) -> CliError {
     match status {
         StatusCode::UNAUTHORIZED => CliError::Unauthorized,

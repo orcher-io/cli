@@ -24,6 +24,7 @@
 //! ```
 
 use crate::client::connection::ConnectionManager;
+use crate::client::with_gateway_auth;
 use crate::error::{CliError, Result};
 use crate::render;
 use crate::utils::GlobalConfig;
@@ -184,14 +185,14 @@ pub async fn execute(cmd: BatchCommand, global_config: &GlobalConfig) -> Result<
             }
 
             let client = reqwest::Client::new();
-            let resp = client
-                .post(format!("{}/api/v1/batch-operations", gateway_url))
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
-                    CliError::internal(format!("Failed to create batch operation: {}", e))
-                })?;
+            let resp = with_gateway_auth(
+                client.post(format!("{}/api/v1/batch-operations", gateway_url)),
+                global_config,
+            )
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CliError::internal(format!("Failed to create batch operation: {}", e)))?;
 
             if !resp.status().is_success() {
                 let text = resp.text().await.unwrap_or_default();
@@ -223,9 +224,12 @@ pub async fn execute(cmd: BatchCommand, global_config: &GlobalConfig) -> Result<
             }
 
             let client = reqwest::Client::new();
-            let resp = client.get(&url).send().await.map_err(|e| {
-                CliError::internal(format!("Failed to list batch operations: {}", e))
-            })?;
+            let resp = with_gateway_auth(client.get(&url), global_config)
+                .send()
+                .await
+                .map_err(|e| {
+                    CliError::internal(format!("Failed to list batch operations: {}", e))
+                })?;
 
             if !resp.status().is_success() {
                 let text = resp.text().await.unwrap_or_default();
@@ -282,14 +286,16 @@ pub async fn execute(cmd: BatchCommand, global_config: &GlobalConfig) -> Result<
 
         BatchAction::Describe { job_id } => {
             let client = reqwest::Client::new();
-            let resp = client
-                .get(format!(
+            let resp = with_gateway_auth(
+                client.get(format!(
                     "{}/api/v1/batch-operations/{}",
                     gateway_url, job_id
-                ))
-                .send()
-                .await
-                .map_err(|e| CliError::internal(format!("Failed to get batch operation: {}", e)))?;
+                )),
+                global_config,
+            )
+            .send()
+            .await
+            .map_err(|e| CliError::internal(format!("Failed to get batch operation: {}", e)))?;
 
             if !resp.status().is_success() {
                 let text = resp.text().await.unwrap_or_default();
@@ -353,16 +359,18 @@ pub async fn execute(cmd: BatchCommand, global_config: &GlobalConfig) -> Result<
 
         BatchAction::Terminate { job_id, reason } => {
             let client = reqwest::Client::new();
-            let resp = client
-                .post(format!(
+            let resp = with_gateway_auth(
+                client.post(format!(
                     "{}/api/v1/batch-operations/{}/terminate",
                     gateway_url, job_id
-                ))
-                .send()
-                .await
-                .map_err(|e| {
-                    CliError::internal(format!("Failed to terminate batch operation: {}", e))
-                })?;
+                )),
+                global_config,
+            )
+            .send()
+            .await
+            .map_err(|e| {
+                CliError::internal(format!("Failed to terminate batch operation: {}", e))
+            })?;
 
             if !resp.status().is_success() {
                 let text = resp.text().await.unwrap_or_default();
@@ -386,4 +394,67 @@ fn resolve_gateway_url(config: &GlobalConfig) -> String {
     ConnectionManager::from_config(config)
         .http_addr()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gateway(url: &str) -> GlobalConfig {
+        GlobalConfig {
+            api_url: Some(url.to_string()),
+            output_format: "json".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Batch operations go to the configured gateway, with the credential.
+    #[tokio::test]
+    async fn batch_list_calls_the_gateway_with_the_credential() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/batch-operations")
+            .match_query(mockito::Matcher::UrlEncoded("limit".into(), "20".into()))
+            .match_header("authorization", "Bearer token-1")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"batchOperations":[{"id":"b1","operationType":"cancel","status":"completed","processedCount":2,"totalCount":2}]}"#)
+            .create_async()
+            .await;
+        std::env::set_var("ORCHER_TOKEN", "token-1");
+        let result = execute(
+            BatchCommand {
+                action: BatchAction::List {
+                    status: None,
+                    limit: 20,
+                },
+            },
+            &gateway(&server.url()),
+        )
+        .await;
+        std::env::remove_var("ORCHER_TOKEN");
+        result.unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_gateway_error_is_reported() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v1/batch-operations/b9")
+            .with_status(404)
+            .with_body("no such batch operation")
+            .create_async()
+            .await;
+        let err = execute(
+            BatchCommand {
+                action: BatchAction::Describe {
+                    job_id: "b9".into(),
+                },
+            },
+            &gateway(&server.url()),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("no such batch operation"), "{err}");
+    }
 }

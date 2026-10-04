@@ -84,3 +84,7 @@ windows = { version = "0.52", features = ["Win32_Security_Credentials"] }
 [profile.release]
 strip = true
 lto = "thin"
+
+[dev-dependencies]
+# A stand-in HTTP server, for the commands only a cloud gateway serves.
+mockito = "1"
