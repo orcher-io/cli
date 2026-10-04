@@ -1,0 +1,41 @@
+name: Release Please
+
+# Every push to main is read as Conventional Commits. release-please keeps a
+# pull request open with the next version (in Cargo.toml) and its changelog;
+# merging it tags the release and creates the GitHub release. It then starts
+# release.yml (dist) for that tag, which builds the binaries and installers,
+# uploads them to the release, and runs the publish jobs, each of which waits
+# for approval in its environment.
+#
+# A tag created with GITHUB_TOKEN starts no workflow, which is why release.yml
+# is started explicitly; a workflow_dispatch is the one event GITHUB_TOKEN may
+# trigger. To rerun a release by hand: Actions → Release → Run workflow, with
+# the tag (for example v0.1.0) as the input.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      - name: Start the release build for the new tag
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh workflow run release.yml --ref "$TAG" -f tag="$TAG"

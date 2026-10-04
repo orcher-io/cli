@@ -48,7 +48,9 @@ const TYPESCRIPT: Files = &[
 const RUST: Files = &[
     ("README.md", include_str!("rust/README.md")),
     (".gitignore", include_str!("rust/gitignore")),
-    ("Cargo.toml", include_str!("rust/Cargo.toml")),
+    // Kept as Cargo.toml.tmpl: Cargo leaves out of a package any directory
+    // with a Cargo.toml in it, which would drop this template from the crate.
+    ("Cargo.toml", include_str!("rust/Cargo.toml.tmpl")),
     ("src/workflows.rs", include_str!("rust/src/workflows.rs")),
     ("src/main.rs", include_str!("rust/src/main.rs")),
 ];

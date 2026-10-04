@@ -1,0 +1,223 @@
+name: Publish
+
+# Publishes a release to the package registries. Started by release.yml (dist)
+# once the release's binaries and installers are on the GitHub release; run it
+# by hand with the tag to retry a publish. Each registry is a job of its own in
+# an environment that waits for approval, and skips a version that is already
+# there, so one that failed can be run again without touching the others.
+#
+#   crates.io  `orcher`   environment crates-io  trusted publishing (OIDC)
+#   PyPI       `orcher`   environment pypi       trusted publishing (OIDC)
+#   npm        `orcher`   environment npm        trusted publishing (OIDC), provenance
+#   Homebrew   orcher-io/homebrew-tap  environment homebrew  HOMEBREW_TAP_TOKEN
+#
+# The trusted publishers name this repository, this workflow file
+# (publish.yml) and the environment. Publishing runs here rather than inside
+# release.yml because the registries identify the workflow at the top.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to publish, such as v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# A publish is never cancelled halfway.
+concurrency:
+  group: publish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  # The tag must name a GitHub release carrying the same version as Cargo.toml.
+  target:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $version"
+            exit 1
+          fi
+          gh release view "$TAG" >/dev/null
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  crates:
+    needs: target
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/orcher/${{ needs.target.outputs.version }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+      VERSION: ${{ needs.target.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      # A CARGO_REGISTRY_TOKEN secret in the environment, when set, is used
+      # instead of trusted publishing.
+      - uses: rust-lang/crates-io-auth-action@v1
+        if: env.HAS_TOKEN != 'true'
+        id: auth
+      - name: Publish orcher
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if curl -fsS "https://index.crates.io/or/ch/orcher" 2>/dev/null |
+            jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
+            echo "orcher $VERSION is already on crates.io; skipping."
+            exit 0
+          fi
+          cargo publish --locked -p orcher
+
+  wheels:
+    needs: target
+    uses: ./.github/workflows/build-wheels.yml
+    with:
+      ref: ${{ inputs.tag }}
+      all-platforms: true
+
+  # Only this job can mint the PyPI token, and it runs nothing but the upload.
+  pypi:
+    needs: [target, wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/orcher/${{ needs.target.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,sdist}"
+          path: dist
+          merge-multiple: true
+      - name: Check every file is there
+        run: |
+          ls -l dist
+          test "$(find dist -name '*.whl' | wc -l)" -eq 7
+          test "$(find dist -name '*.tar.gz' | wc -l)" -eq 1
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  # The wheels go on the GitHub release too, beside dist's archives.
+  attach-wheels:
+    needs: [target, wheels]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,sdist}"
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${{ inputs.tag }}" dist/* --clobber
+
+  # dist built the npm package (orcher-npm-package.tar.gz) and put it on the
+  # release. On install it downloads the binary for the platform from the
+  # release.
+  npm:
+    needs: target
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/orcher/v/${{ needs.target.outputs.version }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.target.outputs.version }}
+    steps:
+      # Trusted publishing needs Node 22.14 or later and npm 11.5.1 or later.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@^11.5.1
+      - name: Fetch the package from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release download "${{ inputs.tag }}" --pattern orcher-npm-package.tar.gz
+      - name: The package must carry the release's version
+        run: |
+          tar -xzf orcher-npm-package.tar.gz package/package.json
+          test "$(node -p "require('./package/package.json').name")" = orcher
+          test "$(node -p "require('./package/package.json').version")" = "$VERSION"
+      # npm uses trusted publishing when the package has a trusted publisher
+      # for this workflow, and otherwise the NPM_TOKEN secret.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$(npm view "orcher@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+            echo "orcher@$VERSION is already on npm; skipping."
+            exit 0
+          fi
+          npm publish ./orcher-npm-package.tar.gz --provenance --access public
+
+  homebrew:
+    needs: target
+    runs-on: ubuntu-latest
+    environment:
+      name: homebrew
+      url: https://github.com/orcher-io/homebrew-tap
+    permissions:
+      contents: read
+    env:
+      TAP: orcher-io/homebrew-tap
+    steps:
+      - name: Fetch the formula from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release download "${{ inputs.tag }}" --pattern orcher.rb --dir formula
+      # HOMEBREW_TAP_TOKEN: a fine-grained token with Contents read and write
+      # on orcher-io/homebrew-tap only.
+      - name: Commit it to the tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.target.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set in the homebrew environment"
+            exit 1
+          fi
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" tap
+          mkdir -p tap/Formula
+          cp formula/orcher.rb tap/Formula/orcher.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/orcher.rb
+          if git diff --cached --quiet; then
+            echo "Formula/orcher.rb is already at $VERSION."
+            exit 0
+          fi
+          git commit -m "orcher $VERSION"
+          git push origin HEAD

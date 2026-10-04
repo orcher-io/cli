@@ -27,6 +27,10 @@ PASSED=0
 GRPC_PORT=${E2E_GRPC_PORT:-50051}
 HTTP_PORT=${E2E_HTTP_PORT:-8080}
 
+# The engine release `orcher dev start` runs by default, from the source.
+ENGINE_VERSION=$(sed -n 's/^pub const DEFAULT_ENGINE_VERSION: &str = "\(.*\)";/\1/p' "$HERE/../../src/local_engine.rs")
+[ -n "$ENGINE_VERSION" ] || { echo "cannot read DEFAULT_ENGINE_VERSION" >&2; exit 2; }
+
 export NO_COLOR=1
 export ORCHER_SERVER=http://localhost:$GRPC_PORT
 # A config file of its own, so the run neither reads nor changes yours.
@@ -133,7 +137,7 @@ echo "== dev"
 check "status before start" 0 "out:not running" -- dev status
 DEV_PORTS=(--port "$GRPC_PORT" --http-port "$HTTP_PORT")
 check "start" 0 - -- dev start "${DEV_PORTS[@]}"
-check "status is ready" 0 'jq:.engine.state == "ready" and .engine.grpcPort == '"$GRPC_PORT"' and .engine.version == "0.5.5" and .postgres.state == "ready"' -- dev status -o json
+check "status is ready" 0 'jq:.engine.state == "ready" and .engine.grpcPort == '"$GRPC_PORT"' and .engine.version == "'"$ENGINE_VERSION"'" and .postgres.state == "ready"' -- dev status -o json
 check "start again is a no-op" 0 - -- dev start -q "${DEV_PORTS[@]}"
 check "start on other ports while running is refused" 1 "err:already running" -- dev start --port $((GRPC_PORT + 10)) --http-port $((HTTP_PORT + 10))
 check "engine log" 0 "out:INFO" -- dev logs --tail 20
@@ -142,7 +146,7 @@ if curl -fsS "http://localhost:$HTTP_PORT/health/ready" >/dev/null; then pass "h
 echo "== server"
 check "server status: engine healthy, no gateway configured" 0 'jq:.services.orchestrator.overall_healthy and .services.orchestrator.grpc.healthy and .services.orchestrator.http.healthy and (.services.gateway.configured | not) and .all_healthy' -- server status -o json
 check "server status as a table" 0 "out:All services healthy" -- server status
-check "server version names the engine release" 0 'jq:.engine == "0.5.5" and .orchestrator.running' -- server version -o json
+check "server version names the engine release" 0 'jq:.engine == "'"$ENGINE_VERSION"'" and .orchestrator.running' -- server version -o json
 check "server status of an unreachable engine" 0 'jq:(.all_healthy | not)' -- server status -o json --grpc-addr http://localhost:1 --orchestrator-http http://localhost:1
 
 echo "== namespaces"

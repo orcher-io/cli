@@ -1,0 +1,157 @@
+name: Release check
+
+# Builds what a release would ship and installs each kind the way a user
+# would, without publishing anything:
+#
+#   - dist's archive, shell installer, PowerShell installer, npm package and
+#     Homebrew formula: the installers are run against a local web server that
+#     serves the archives from the paths the GitHub release would
+#   - the PyPI wheels and sdist (build-wheels.yml): pip and uvx install them
+#   - the crate, as `cargo publish --dry-run` packages and builds it
+#
+# On pull requests that change the packaging it checks Linux x86_64 only, to
+# keep the cost down; run it by hand for every platform.
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - dist-workspace.toml
+      - .github/workflows/release*.yml
+      - .github/workflows/publish*.yml
+      - .github/workflows/build-wheels.yml
+  workflow_dispatch:
+    inputs:
+      all-platforms:
+        description: Every platform (macOS and Windows too)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DIST_VERSION: "0.33.0"
+
+jobs:
+  dist:
+    name: dist (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04, everywhere: false }
+          - { target: aarch64-apple-darwin, runner: macos-latest, everywhere: true }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, everywhere: true }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Skip unless every platform is wanted
+        id: want
+        run: echo "build=${{ (github.event_name == 'workflow_dispatch' && inputs.all-platforms) || !matrix.everywhere }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.want.outputs.build == 'true'
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.want.outputs.build == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.want.outputs.build == 'true'
+        with:
+          key: dist-${{ matrix.target }}
+      - name: Install dist
+        if: steps.want.outputs.build == 'true'
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -ExecutionPolicy Bypass -c "irm https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.ps1 | iex"
+          else
+            curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+          fi
+      - name: Build the archive and the installers
+        if: steps.want.outputs.build == 'true'
+        run: |
+          dist build --artifacts=local --target ${{ matrix.target }}
+          dist build --artifacts=global
+          ls -l target/distrib
+
+      # Serves target/distrib as the release download directory would be.
+      - name: Serve the artifacts
+        if: steps.want.outputs.build == 'true'
+        run: |
+          (cd target/distrib && python3 -m http.server 8765 >/dev/null 2>&1 &)
+          for _ in $(seq 1 20); do curl -fsS http://127.0.0.1:8765/ >/dev/null && break; sleep 0.5; done
+
+      - name: Shell installer (curl | sh)
+        if: steps.want.outputs.build == 'true' && runner.os != 'Windows'
+        run: |
+          home=$(mktemp -d)
+          INSTALLER_DOWNLOAD_URL=http://127.0.0.1:8765 CARGO_HOME="$home" ORCHER_NO_MODIFY_PATH=1 \
+            sh target/distrib/orcher-installer.sh
+          "$home/bin/orcher" --version | tee version.txt
+          grep -Eq "^orcher [0-9]+\.[0-9]+\.[0-9]+" version.txt
+
+      - name: PowerShell installer
+        if: steps.want.outputs.build == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $home_dir = Join-Path $env:RUNNER_TEMP "orcher-home"
+          $env:CARGO_HOME = $home_dir
+          $env:INSTALLER_DOWNLOAD_URL = "http://127.0.0.1:8765"
+          $env:ORCHER_NO_MODIFY_PATH = "1"
+          powershell -ExecutionPolicy Bypass -File target/distrib/orcher-installer.ps1
+          $out = & (Join-Path $home_dir "bin/orcher.exe") --version
+          Write-Output $out
+          if ($out -notmatch '^orcher \d+\.\d+\.\d+') { throw "unexpected version output: $out" }
+
+      # The npm package downloads the binary for the platform on install, from
+      # the release. Here its download URL is pointed at the local server.
+      - uses: actions/setup-node@v4
+        if: steps.want.outputs.build == 'true'
+        with:
+          node-version: 22
+      - name: npm package (npm install / npx)
+        if: steps.want.outputs.build == 'true'
+        run: |
+          work=$(mktemp -d)
+          tar -xzf target/distrib/orcher-npm-package.tar.gz -C "$work"
+          test "$(node -p "require('$work/package/package.json').name")" = orcher
+          node -e '
+            const fs = require("fs"); const p = process.argv[1];
+            const pkg = JSON.parse(fs.readFileSync(p));
+            pkg.artifactDownloadUrls = ["http://127.0.0.1:8765"];
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2));' "$work/package/package.json"
+          (cd "$work" && tar -czf orcher-local.tgz package)
+          prefix=$(mktemp -d)
+          npm install -g --prefix "$prefix" "$work/orcher-local.tgz"
+          if [ "$RUNNER_OS" = Windows ]; then bin="$prefix/orcher.cmd"; else bin="$prefix/bin/orcher"; fi
+          "$bin" --version | tee version.txt
+          grep -Eq "^orcher [0-9]+\.[0-9]+\.[0-9]+" version.txt
+
+      - name: Homebrew formula
+        if: steps.want.outputs.build == 'true' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          ruby -c target/distrib/orcher.rb
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          grep -q "releases/download/v${version}/orcher-x86_64-unknown-linux-gnu.tar.xz" target/distrib/orcher.rb
+          grep -q 'bin.install "orcher"' target/distrib/orcher.rb
+
+  wheels:
+    uses: ./.github/workflows/build-wheels.yml
+    with:
+      ref: ${{ github.sha }}
+      all-platforms: ${{ github.event_name == 'workflow_dispatch' && inputs.all-platforms }}
+
+  crate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Packages the crate as crates.io would receive it and builds that.
+      - run: cargo publish --dry-run --locked
