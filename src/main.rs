@@ -20,6 +20,7 @@ use settings::GlobalArgs;
     propagate_version = true,
     after_help = "\
 Examples:
+  orcher dev start                         Run a local engine in Docker
   orcher workflow list                     Recent workflow executions
   orcher workflow list -o json | jq .      The same, for scripts
   orcher workflow describe order-1001      One workflow in detail
@@ -36,6 +37,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a local engine in Docker for development
+    Dev(commands::dev::DevCommand),
+
     /// Inspect and control workflow executions
     #[command(alias = "wf")]
     Workflow(commands::workflow::WorkflowCommand),
@@ -60,6 +64,7 @@ async fn main() {
     }
 
     let result = match cli.command {
+        Command::Dev(cmd) => commands::dev::run(cmd, &cli.global).await,
         Command::Workflow(cmd) => commands::workflow::run(cmd, &cli.global).await,
         Command::Logs(cmd) => commands::logs::run(cmd, &cli.global).await,
         Command::Namespace(cmd) => commands::namespace::run(cmd, &cli.global).await,

@@ -8,7 +8,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(Debug, Error)]
 pub enum Error {
     /// The engine could not be reached at all.
-    #[error("cannot reach the engine at {address}: {reason}\n  Is it running? Point at another address with --server or ORCHER_SERVER.")]
+    #[error("cannot reach the engine at {address}: {reason}\n  Is it running? Start a local one with `orcher dev start`, or point at another with --server.")]
     Connect { address: String, reason: String },
 
     /// The engine answered, but with an error.

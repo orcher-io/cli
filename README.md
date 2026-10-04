@@ -17,7 +17,9 @@
 
 <br />
 
-`orcher` talks to an ORCHER engine over its gRPC API: list the workflows it is running, look inside one, read its log, and stop it.
+`orcher` runs an ORCHER engine on your machine and talks to any engine over its gRPC API: list the workflows it is running, look inside one, read its log, and stop it.
+
+- <img height="14" src="https://octicons-col.vercel.app/server/38BDF0"> **Local engine**: `orcher dev start` runs the engine and its database in Docker, ready in seconds
 
 - <img height="14" src="https://octicons-col.vercel.app/list-unordered/38BDF0"> **Workflows**: list, filter and search executions, and see each one's status, result and pending work
 - <img height="14" src="https://octicons-col.vercel.app/history/38BDF0"> **History**: the journal of every step the engine recorded, and the tasks it ran
@@ -42,7 +44,13 @@ cargo install --git https://github.com/orcher-io/cli
 
 ### <img height="16" src="https://octicons-col.vercel.app/play/38BDF0"> Quick start
 
-With an engine running on `localhost:50051` (the [quickstart](https://github.com/orcher-io/quickstart) starts one with Docker):
+Start a local engine. It needs [Docker](https://docs.docker.com/get-docker/), and keeps its data until you delete it:
+
+```bash
+orcher dev start                           # the engine on localhost:50051
+```
+
+Run a worker against it (the [quickstart](https://github.com/orcher-io/quickstart) has one in Python, TypeScript and Rust), then:
 
 ```bash
 orcher workflow list                       # recent workflow executions
@@ -58,6 +66,10 @@ orcher workflow cancel order-1001          # ask it to stop
 
 | Command | What it does |
 |---------|--------------|
+| `orcher dev start` | Run a local engine in Docker and wait until it is ready |
+| `orcher dev status` | Whether it is running, which version, and on which ports |
+| `orcher dev logs` | The engine's log; `--follow` to keep reading |
+| `orcher dev stop` | Stop it; `--delete-data` also forgets every workflow it ran |
 | `orcher workflow list` | List executions; filter with `--type` and `--status`, or `--query` |
 | `orcher workflow describe <id>` | Status, timing, result or error, and pending tasks, timers and events |
 | `orcher workflow history <id>` | The journal: every step the engine recorded |
@@ -85,6 +97,8 @@ Every command takes these, as a flag or from the environment:
 | `-o`, `--output` | | `table` | `table`, `json`, `yaml` or `name` |
 | `-q`, `--quiet` | | | Print only what was asked for |
 | `--no-color` | `NO_COLOR` | | Plain text |
+
+`orcher dev start` takes `--engine-version` (default `0.5.5`) to run another engine release, and `--grpc-port` and `--http-port` when the defaults, 50051 and 8080, are taken. The engine's ports are bound to `127.0.0.1` only: it runs without authentication, for this machine alone.
 
 A command that fails prints the reason to stderr and exits with status 1. Commands that would stop or delete something ask first; pass `--yes` to skip the question, as you must when there is no terminal to ask on.
 
