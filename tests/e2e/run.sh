@@ -337,11 +337,14 @@ export ORCHER_CREDENTIAL_STORE=file
 echo "not-the-key" | "$ORCHER" auth login --token --server "$ORCHER_SERVER" >"$WORK/out" 2>"$WORK/err"; STATUS=$?
 if [ "$STATUS" -eq 1 ] && grep -q "did not accept the token" "$WORK/err"; then pass "auth login refuses a wrong token"; else fail "auth login refuses a wrong token"; fi
 echo "$KEY" | "$ORCHER" auth login --token --server "$ORCHER_SERVER" >"$WORK/out" 2>"$WORK/err"; STATUS=$?
-if [ "$STATUS" -eq 0 ] && grep -q "Logged in; using context 'auto-localhost'" "$WORK/out"; then pass "auth login --token checks and keeps the token"; else fail "auth login --token checks and keeps the token"; fi
+# The context is the one already pointing at this server (`local` on the
+# default port), or a new `auto-localhost`.
+CTX=$(sed -n "s/.*Logged in; using context '\(.*\)'.*/\1/p" "$WORK/out")
+if [ "$STATUS" -eq 0 ] && [ -n "$CTX" ]; then pass "auth login --token checks and keeps the token"; else fail "auth login --token checks and keeps the token"; fi
 if [ "$(stat -c %a "$WORK/credentials" 2>/dev/null || stat -f %Lp "$WORK/credentials")" = 600 ]; then pass "the credentials file is private"; else STATUS=0; : >"$WORK/out"; : >"$WORK/err"; fail "the credentials file is private"; fi
 check "the stored login is used" 0 'jq:.status == "COMPLETED"' -- workflow get auth-1 -o json
-check "config shows the new current context" 0 "out:*  auto-localhost" -- config get-contexts
-check "auth status names the context" 0 "out:auto-localhost" -- auth status
+check "config shows the login's context as current" 0 "out:*  $CTX" -- config get-contexts
+check "auth status names the context" 0 "out:Current context: $CTX" -- auth status
 check "auth logout" 0 "out:Logged out" -- auth logout
 check "after logout the engine refuses" 1 "err:Missing authorization header" -- workflow list
 unset ORCHER_CREDENTIAL_STORE
