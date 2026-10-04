@@ -106,14 +106,9 @@ pub async fn list_accounts(service: &str) -> Result<Vec<String>> {
         let _service = service.to_string();
 
         move || {
-            // Note: The security_framework crate doesn't provide a direct way to search
-            // for all items with a specific service. This is a simplified implementation
-            // that would need to be enhanced with lower-level Security Framework calls
-            // for a production system.
-
-            // For now, we'll return an empty list as a placeholder
-            // In a real implementation, this would use SecItemCopyMatching with appropriate
-            // search parameters to find all items for the service
+            // security-framework has no call that lists a service's items;
+            // that takes SecItemCopyMatching. Nothing in the CLI lists
+            // accounts, so this reports none.
             Ok(Vec::new())
         }
     })
