@@ -15,6 +15,23 @@ cargo fmt --all --check     # CI fails on unformatted code
 cargo clippy --all-targets -- -D warnings
 ```
 
+### End-to-end tests
+
+`tests/e2e/run.sh` drives every command against a real engine: it starts one
+with `orcher dev start`, runs the workflows in `tests/e2e/worker.py` with the
+Python SDK, and checks each command's exit status and output. CI runs it on
+every pull request. To run it yourself you need Docker and jq:
+
+```bash
+cargo build
+python3 -m venv .venv && .venv/bin/pip install -r tests/e2e/requirements.txt
+tests/e2e/run.sh target/debug/orcher .venv/bin/python
+```
+
+It uses ports 50051 and 8080; set `E2E_GRPC_PORT` and `E2E_HTTP_PORT` to use
+others. It deletes the engine and its data when it ends, so do not run it while
+you have a local engine whose workflows you want to keep.
+
 The gRPC types come from the [`orcher-proto`](https://github.com/orcher-io/protos)
 crate on crates.io.
 
