@@ -1,0 +1,46 @@
+[package]
+name = "orcher"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "The ORCHER command-line interface: run a local engine, start and inspect workflows"
+repository = "https://github.com/orcher-io/cli"
+homepage = "https://github.com/orcher-io"
+readme = "README.md"
+keywords = ["orcher", "workflow", "durable-execution", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["src/**/*", "Cargo.toml", "README.md", "LICENSE"]
+
+[[bin]]
+name = "orcher"
+path = "src/main.rs"
+
+[dependencies]
+orcher-proto = "0.1"
+# `tls-native-roots` lets https:// servers be verified against the operating
+# system's trust store; http:// servers stay plaintext.
+tonic = { version = "0.12", features = ["tls-native-roots"] }
+prost-types = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "process", "signal"] }
+
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4.5"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+console = "0.15"
+dialoguer = { version = "0.11", default-features = false }
+tabled = { version = "0.15", features = ["ansi"] }
+jiff = "0.2"
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
