@@ -74,17 +74,25 @@ pub const DEFAULT_GRPC_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct AuthInterceptor {
     /// Bearer token for authentication
     token: Option<String>,
+    /// Deadline for a call that sets none of its own
+    default_timeout: Option<Duration>,
 }
 
 impl AuthInterceptor {
     /// Create a new auth interceptor with no authentication
     pub fn none() -> Self {
-        Self { token: None }
+        Self {
+            token: None,
+            default_timeout: None,
+        }
     }
 
     /// Create a new auth interceptor with a bearer token
     pub fn with_token(token: String) -> Self {
-        Self { token: Some(token) }
+        Self {
+            token: Some(token),
+            default_timeout: None,
+        }
     }
 
     /// Load authentication from environment and secure storage
@@ -142,8 +150,25 @@ pub(crate) fn non_empty_env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+impl AuthInterceptor {
+    /// Give every call that sets no deadline of its own this one.
+    pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
+        self.default_timeout = Some(timeout);
+        self
+    }
+}
+
 impl Interceptor for AuthInterceptor {
     fn call(&mut self, mut request: Request<()>) -> std::result::Result<Request<()>, Status> {
+        // The deadline is per call, not on the channel: a channel deadline
+        // caps every call, including one that waits on purpose for longer
+        // (a workflow's result).
+        if let Some(timeout) = self.default_timeout {
+            if !request.metadata().contains_key("grpc-timeout") {
+                request.set_timeout(timeout);
+            }
+        }
+
         // Add Bearer token if available
         if let Some(ref token) = self.token {
             let header_value = format!("Bearer {}", token);
@@ -180,6 +205,16 @@ pub fn build_grpc_endpoint(
     connect_timeout: Duration,
     tls: Option<&crate::config::TlsConfig>,
 ) -> Result<Endpoint> {
+    Ok(build_untimed_endpoint(address, connect_timeout, tls)?.timeout(timeout))
+}
+
+/// An endpoint without a channel-wide request deadline, for a client whose
+/// calls set their own.
+fn build_untimed_endpoint(
+    address: &str,
+    connect_timeout: Duration,
+    tls: Option<&crate::config::TlsConfig>,
+) -> Result<Endpoint> {
     // Normalize: bare host defaults to plaintext http, matching the rest of the CLI.
     let uri = if address.starts_with("http://") || address.starts_with("https://") {
         address.to_string()
@@ -193,7 +228,6 @@ pub fn build_grpc_endpoint(
             message: format!("Invalid gRPC endpoint '{}': {}", uri, e),
             source: None,
         })?
-        .timeout(timeout)
         .connect_timeout(connect_timeout);
 
     if is_https {
@@ -312,8 +346,7 @@ impl OrcherGrpcClient {
         let tls = load_context_tls(context);
 
         // Build the endpoint — TLS is auto-enabled for https:// (cloud) addresses.
-        let endpoint =
-            build_grpc_endpoint(address, timeout, Duration::from_secs(10), tls.as_ref())?;
+        let endpoint = build_untimed_endpoint(address, Duration::from_secs(10), tls.as_ref())?;
 
         // Connect to the server
         let channel = endpoint.connect().await.map_err(|e| CliError::Network {
@@ -322,7 +355,8 @@ impl OrcherGrpcClient {
         })?;
 
         // Create auth interceptor
-        let interceptor = AuthInterceptor::from_env_and_storage(context);
+        let interceptor =
+            AuthInterceptor::from_env_and_storage(context).with_default_timeout(timeout);
         let authenticated = interceptor.is_authenticated();
 
         if authenticated {

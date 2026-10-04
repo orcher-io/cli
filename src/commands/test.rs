@@ -1,23 +1,29 @@
-//! `orcher test` — build, check, and run workflow project tests.
+//! `orcher test` — check a project, or run its workflows end to end.
+//!
+//! The project's language is detected from its files (see
+//! [`Language::detect`]). `--dry-run` only checks that it builds; otherwise
+//! its own test runs against the engine the CLI points at, which is passed on
+//! as `ORCHER_SERVER`, `ORCHER_NAMESPACE` and, when set, `ORCHER_API_KEY`.
 
-use crate::client::connection::{ConnectionManager, ServerType};
+use crate::client::connection::ConnectionManager;
+use crate::commands::new::Language;
 use crate::error::{CliError, Result};
 use crate::utils::GlobalConfig;
 use console::style;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tracing::{debug, info};
+use tracing::info;
 
 /// Test mode for workflow testing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
-    /// Run the service and execute workflows (E2E)
+    /// Run the project's test, which runs its workflows against the engine
     E2E,
     /// Run only the worker (service) side
     Worker,
     /// Run only the client side (start workflows)
     Client,
-    /// Validate registration without execution
+    /// Check that the project builds, without running anything
     Check,
 }
 
@@ -44,340 +50,202 @@ pub async fn execute(
         workflow, dry_run, watch
     );
 
-    let project_path = Path::new(&workflow);
-
-    if project_path.is_dir() {
-        // Testing a Cargo project directory
-        test_cargo_project(
-            project_path,
-            dry_run,
-            environment.as_deref(),
-            watch,
-            global_config,
-        )
-        .await
-    } else if project_path.extension().map(|e| e == "rs").unwrap_or(false) {
-        // Testing a specific Rust file - not directly supported
-        println!(
-            "{}  Orcher uses code-first workflows. To test, provide the project directory.",
-            style("•").yellow()
-        );
-        println!();
-        println!("   Usage:");
-        println!(
-            "     {}  Test current directory",
-            style("orcher test .").cyan()
-        );
-        println!(
-            "     {}  Test specific project",
-            style("orcher test ./my-workflow").cyan()
-        );
-        println!(
-            "     {}  Check registration only",
-            style("orcher test . --dry-run").cyan()
-        );
-        Ok(())
-    } else if workflow == "." || workflow.is_empty() {
-        // Test current directory
-        test_cargo_project(
-            Path::new("."),
-            dry_run,
-            environment.as_deref(),
-            watch,
-            global_config,
-        )
-        .await
+    let project_path = if workflow.is_empty() {
+        PathBuf::from(".")
     } else {
-        // Assume it's a project directory
-        test_cargo_project(
-            project_path,
-            dry_run,
-            environment.as_deref(),
-            watch,
-            global_config,
-        )
-        .await
+        PathBuf::from(&workflow)
+    };
+    if !project_path.is_dir() {
+        return Err(CliError::invalid_input(format!(
+            "'{}' is not a project directory. Run `orcher test` in a project made with \
+             `orcher new`, or pass its directory.",
+            workflow
+        )));
     }
-}
-
-async fn test_cargo_project(
-    project_path: &Path,
-    dry_run: bool,
-    environment: Option<&str>,
-    watch: bool,
-    global_config: &GlobalConfig,
-) -> Result<()> {
-    // Validate it's a Cargo project
-    let cargo_toml = project_path.join("Cargo.toml");
-    if !cargo_toml.exists() {
-        return Err(CliError::NotFound {
-            resource_type: "Cargo project".to_string(),
-            name: project_path.display().to_string(),
-            namespace: None,
-        });
-    }
-
-    if !global_config.quiet {
-        println!(
-            "{}  Testing Orcher workflow project: {}",
-            style("→").cyan(),
+    let language = Language::detect(&project_path).ok_or_else(|| {
+        CliError::invalid_input(format!(
+            "No Python, TypeScript or Rust project in '{}'.",
             project_path.display()
-        );
-    }
+        ))
+    })?;
 
-    // Determine test mode
     let mode = if dry_run {
         TestMode::Check
     } else {
         TestMode::E2E
     };
-
-    match mode {
-        TestMode::Check => {
-            // Just build and check - validates workflow registration
-            run_cargo_check(project_path, global_config).await
-        }
-        TestMode::E2E => {
-            // Run cargo test for the project
-            if watch {
-                run_cargo_watch_test(project_path, environment, global_config).await
+    if !global_config.quiet {
+        println!(
+            "{}  {} {} project in {}",
+            style("→").cyan(),
+            if mode == TestMode::Check {
+                "Checking"
             } else {
-                run_cargo_test(project_path, environment, global_config).await
-            }
-        }
-        TestMode::Worker | TestMode::Client => {
-            // These would be implemented for more granular testing
-            run_cargo_test(project_path, environment, global_config).await
-        }
-    }
-}
-
-/// Run `cargo check` to validate workflow registration
-async fn run_cargo_check(project_path: &Path, global_config: &GlobalConfig) -> Result<()> {
-    if !global_config.quiet {
-        println!(
-            "{}  Checking workflow registration (cargo check)...",
-            style("→").cyan()
+                "Testing"
+            },
+            language.name(),
+            project_path.display()
         );
     }
 
-    let output = Command::new("cargo")
-        .arg("check")
-        .current_dir(project_path)
-        .stdout(if global_config.quiet {
-            Stdio::null()
-        } else {
-            Stdio::inherit()
-        })
-        .stderr(if global_config.quiet {
-            Stdio::null()
-        } else {
-            Stdio::inherit()
-        })
-        .output()
-        .map_err(|e| CliError::IO {
-            message: format!("Failed to run cargo check: {}", e),
-            path: Some(project_path.to_path_buf()),
-        })?;
-
-    if output.status.success() {
-        if !global_config.quiet {
-            println!();
-            println!(
-                "{}  Workflow project compiles successfully",
-                style("✓").green()
-            );
-            println!();
-            println!("   Workflows and tasks with #[workflow] and #[task] macros are valid.");
-            println!("   Run {} to execute tests.", style("orcher test .").cyan());
-        }
-        Ok(())
-    } else {
-        Err(CliError::Execution {
-            message: "Cargo check failed - workflow registration errors".to_string(),
-            execution_id: None,
-        })
-    }
-}
-
-/// Run `cargo test` to execute workflow tests
-async fn run_cargo_test(
-    project_path: &Path,
-    environment: Option<&str>,
-    global_config: &GlobalConfig,
-) -> Result<()> {
-    if !global_config.quiet {
-        println!(
-            "{}  Running workflow tests (cargo test)...",
-            style("→").cyan()
-        );
-        println!();
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.arg("test");
-    cmd.current_dir(project_path);
-
-    // Set environment for tests
-    if let Some(env) = environment {
-        cmd.env("ORCHER_ENV", env);
-    }
-
-    // Check if server is available and set connection info
     let manager = ConnectionManager::from_config(global_config);
-    if let Ok(server_type) = manager.detect_best_server().await {
-        match server_type {
-            ServerType::Grpc => {
-                cmd.env("ORCHER_SERVER_URL", manager.grpc_addr());
+    let namespace = environment.unwrap_or_else(|| manager.namespace().to_string());
+
+    let steps = match mode {
+        TestMode::Check => check_commands(language, &project_path),
+        _ => {
+            // The test needs an engine; say so plainly rather than let it time out.
+            let status = manager.check_grpc().await;
+            if !status.available {
+                return Err(CliError::Network {
+                    message: format!(
+                        "No engine answers at {}: the project's test runs its workflows on one.\n\n\
+                         Start one with: orcher dev start   (or check it builds with --dry-run)",
+                        manager.grpc_addr()
+                    ),
+                    source: None,
+                });
             }
-            ServerType::Http => {
-                cmd.env("ORCHER_HTTP_URL", manager.http_addr());
+            if watch {
+                if language == Language::Rust && cargo_watch_installed() {
+                    vec![step(
+                        "cargo",
+                        &["watch", "-x", "test"],
+                        "Watching and testing",
+                    )]
+                } else {
+                    if !global_config.quiet {
+                        println!(
+                            "{}  --watch needs cargo-watch and a Rust project; testing once.",
+                            style("•").yellow()
+                        );
+                    }
+                    test_commands(language, &project_path)
+                }
+            } else {
+                test_commands(language, &project_path)
             }
         }
-    }
+    };
 
-    // Run with output
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
-
-    let status = cmd.status().map_err(|e| CliError::IO {
-        message: format!("Failed to run cargo test: {}", e),
-        path: Some(project_path.to_path_buf()),
-    })?;
-
-    if status.success() {
+    for s in steps {
         if !global_config.quiet {
-            println!();
-            println!("{}  All workflow tests passed", style("✓").green());
+            println!("{}  {}: {}", style("→").cyan(), s.label, s.display());
         }
-        Ok(())
-    } else {
-        Err(CliError::Execution {
-            message: "Workflow tests failed".to_string(),
-            execution_id: None,
-        })
-    }
-}
-
-/// Run `cargo watch` for continuous testing
-async fn run_cargo_watch_test(
-    project_path: &Path,
-    environment: Option<&str>,
-    global_config: &GlobalConfig,
-) -> Result<()> {
-    // Check if cargo-watch is installed
-    let watch_check = Command::new("cargo").args(["watch", "--version"]).output();
-
-    if watch_check.is_err() || !watch_check.unwrap().status.success() {
-        if !global_config.quiet {
-            println!(
-                "{}  cargo-watch not installed. Install with:",
-                style("⚠").yellow()
-            );
-            println!("     {}", style("cargo install cargo-watch").cyan());
-            println!();
-            println!("   Running single test instead...");
+        let mut cmd = Command::new(&s.program);
+        cmd.args(&s.args)
+            .current_dir(&project_path)
+            .env("ORCHER_SERVER", manager.grpc_addr())
+            .env("ORCHER_NAMESPACE", &namespace)
+            .env("ORCHER_ENV", &namespace)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let status = cmd.status().map_err(|e| CliError::IO {
+            message: format!("Failed to run {}: {}", s.program, e),
+            path: Some(project_path.clone()),
+        })?;
+        if !status.success() {
+            return Err(CliError::Execution {
+                message: format!("{} failed ({})", s.display(), status),
+                execution_id: None,
+            });
         }
-        return run_cargo_test(project_path, environment, global_config).await;
     }
 
     if !global_config.quiet {
+        println!();
         println!(
-            "{}  Watching for changes (press Ctrl+C to stop)...",
-            style("→").cyan()
+            "{}  {}",
+            style("✓").green(),
+            if mode == TestMode::Check {
+                "The project builds"
+            } else {
+                "The project's workflows ran end to end"
+            }
         );
-        println!();
     }
-
-    let mut cmd = Command::new("cargo");
-    cmd.args(["watch", "-x", "test"]);
-    cmd.current_dir(project_path);
-
-    if let Some(env) = environment {
-        cmd.env("ORCHER_ENV", env);
-    }
-
-    cmd.stdout(Stdio::inherit());
-    cmd.stderr(Stdio::inherit());
-
-    let mut child = cmd.spawn().map_err(|e| CliError::IO {
-        message: format!("Failed to run cargo watch: {}", e),
-        path: Some(project_path.to_path_buf()),
-    })?;
-
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c().await.ok();
-
-    let _ = child.kill();
-    let _ = child.wait();
-
-    if !global_config.quiet {
-        println!();
-        println!("{}  Watch mode stopped", style("•").yellow());
-    }
-
     Ok(())
 }
 
-/// Run a workflow service binary in E2E mode
-#[allow(dead_code)]
-async fn run_e2e_test(project_path: &Path, global_config: &GlobalConfig) -> Result<()> {
-    debug!("Running E2E test for project: {}", project_path.display());
+/// One command to run in the project.
+struct Step {
+    program: String,
+    args: Vec<String>,
+    label: &'static str,
+}
 
-    // Build the project first
-    if !global_config.quiet {
-        println!("{}  Building workflow service...", style("→").cyan());
+impl Step {
+    fn display(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
+}
 
-    let build_output = Command::new("cargo")
-        .arg("build")
-        .current_dir(project_path)
-        .output()
-        .map_err(|e| CliError::IO {
-            message: format!("Failed to build project: {}", e),
-            path: Some(project_path.to_path_buf()),
-        })?;
-
-    if !build_output.status.success() {
-        return Err(CliError::Execution {
-            message: "Failed to build workflow service".to_string(),
-            execution_id: None,
-        });
+fn step(program: &str, args: &[&str], label: &'static str) -> Step {
+    Step {
+        program: program.to_string(),
+        args: args.iter().map(|a| a.to_string()).collect(),
+        label,
     }
+}
 
-    // Run the binary with --e2e flag (convention for Orcher services)
-    if !global_config.quiet {
-        println!("{}  Running E2E tests...", style("→").cyan());
-    }
-
-    let run_output = Command::new("cargo")
-        .args(["run", "--", "--e2e"])
-        .current_dir(project_path)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|e| CliError::IO {
-            message: format!("Failed to run E2E tests: {}", e),
-            path: Some(project_path.to_path_buf()),
-        })?;
-
-    if run_output.success() {
-        if !global_config.quiet {
-            println!();
-            println!("{}  E2E tests passed", style("✓").green());
-        }
-        Ok(())
+/// The project's virtual environment's Python when it has one, else python3.
+fn python(project: &Path) -> String {
+    let venv = if cfg!(windows) {
+        project.join(".venv").join("Scripts").join("python.exe")
     } else {
-        Err(CliError::Execution {
-            message: "E2E tests failed".to_string(),
-            execution_id: None,
-        })
+        project.join(".venv").join("bin").join("python")
+    };
+    if venv.is_file() {
+        // Relative to the project, which is where the command runs.
+        if cfg!(windows) {
+            ".venv\\Scripts\\python.exe".to_string()
+        } else {
+            ".venv/bin/python".to_string()
+        }
+    } else {
+        "python3".to_string()
     }
+}
+
+/// How to check that a project builds.
+fn check_commands(language: Language, project: &Path) -> Vec<Step> {
+    match language {
+        Language::Python => vec![step(
+            &python(project),
+            &["-m", "compileall", "-q", "-x", r"[/\\]\.venv", "."],
+            "Compiling",
+        )],
+        Language::TypeScript => vec![step("npm", &["run", "build"], "Building")],
+        Language::Rust => vec![step("cargo", &["check", "--all-targets"], "Checking")],
+    }
+}
+
+/// How to run a project's test.
+fn test_commands(language: Language, project: &Path) -> Vec<Step> {
+    match language {
+        Language::Python if project.join("test_workflow.py").is_file() => {
+            vec![step(&python(project), &["test_workflow.py"], "Running")]
+        }
+        Language::Python => vec![step(&python(project), &["-m", "pytest", "-q"], "Running")],
+        Language::TypeScript => vec![step("npm", &["test"], "Running")],
+        Language::Rust => vec![step("cargo", &["test"], "Running")],
+    }
+}
+
+fn cargo_watch_installed() -> bool {
+    Command::new("cargo")
+        .args(["watch", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_mode_display() {
@@ -385,5 +253,45 @@ mod tests {
         assert_eq!(TestMode::Worker.to_string(), "worker");
         assert_eq!(TestMode::Client.to_string(), "client");
         assert_eq!(TestMode::Check.to_string(), "check");
+    }
+
+    #[test]
+    fn each_language_is_checked_and_tested_its_own_way() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path();
+        assert_eq!(
+            check_commands(Language::Rust, p)[0].display(),
+            "cargo check --all-targets"
+        );
+        assert_eq!(test_commands(Language::Rust, p)[0].display(), "cargo test");
+        assert_eq!(
+            check_commands(Language::TypeScript, p)[0].display(),
+            "npm run build"
+        );
+        assert_eq!(
+            test_commands(Language::TypeScript, p)[0].display(),
+            "npm test"
+        );
+        assert_eq!(
+            test_commands(Language::Python, p)[0].display(),
+            "python3 -m pytest -q"
+        );
+        std::fs::write(p.join("test_workflow.py"), "").unwrap();
+        assert_eq!(
+            test_commands(Language::Python, p)[0].display(),
+            "python3 test_workflow.py"
+        );
+    }
+
+    #[test]
+    fn a_project_virtual_environment_is_used() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(python(dir.path()), "python3");
+        let bin = dir.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python"), "").unwrap();
+        if !cfg!(windows) {
+            assert_eq!(python(dir.path()), ".venv/bin/python");
+        }
     }
 }

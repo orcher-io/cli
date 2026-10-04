@@ -123,16 +123,17 @@ pub enum Commands {
         tasks: bool,
     },
 
-    /// Test workflows locally
+    /// Check a project builds, or run its workflows end to end
     Test {
-        /// Workflow file to test
+        /// Project directory to test
+        #[arg(default_value = ".")]
         workflow: String,
 
-        /// Perform dry run without execution
+        /// Only check that the project builds; run nothing
         #[arg(long)]
         dry_run: bool,
 
-        /// Environment to test against
+        /// Namespace to test in
         #[arg(short = 'e', long = "env")]
         environment: Option<String>,
 
@@ -222,5 +223,15 @@ mod tests {
             "/tmp/engine.toml",
         ]);
         assert!(parsed.is_ok());
+
+        // `new workflow` once had an `output` field, which took the global
+        // --output's value ("table") as the file to write.
+        let parsed = Cli::try_parse_from(["orcher", "new", "workflow", "ship-order"]).unwrap();
+        match parsed.command {
+            Commands::New {
+                resource: NewCommands::Workflow { file, .. },
+            } => assert_eq!(file, None),
+            _ => panic!("parsed as another command"),
+        }
     }
 }

@@ -85,7 +85,9 @@ orcher logs order-1001 --follow            # its log, until it ends
 | `orcher batch ...` | Cancel, terminate, signal or reset many workflows at once, through a gateway |
 | `orcher auth login\|logout\|status` | Log in to ORCHER Cloud (browser device flow, token, or password) |
 | `orcher config ...` | Contexts: `get-contexts`, `use-context`, `set-context`, `view`, `test-connection` |
-| `orcher new ...` | Scaffold a project |
+| `orcher new python\|typescript\|rust <name>` | A new project on the published SDK: a workflow, a task, a worker, a starter and an end-to-end test |
+| `orcher new workflow <name>` | Add a workflow, with one task, to the project in this directory |
+| `orcher test` | Check the project here builds (`--dry-run`), or run its workflows end to end on the engine |
 | `orcher completion <shell>` | Shell completions for bash, zsh, fish, PowerShell and elvish |
 
 Run `orcher <command> --help` for every flag and more examples.

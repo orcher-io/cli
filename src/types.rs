@@ -4,32 +4,71 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum NewCommands {
-    /// Create a new project from template
+    /// Create a new project from a template: python, typescript or rust
     Project {
-        /// Project name
+        /// Project name: lowercase letters, digits and hyphens
         name: String,
 
-        /// Template to use
-        #[arg(short = 't', long = "template", default_value = "basic-workflow")]
+        /// Template to use: python, typescript or rust
+        #[arg(short = 't', long = "template", default_value = "rust")]
         template: String,
 
-        /// Output directory
+        /// Directory to create the project in
         #[arg(short = 'd', long = "dir")]
         directory: Option<String>,
     },
 
-    /// Create a new workflow
+    /// Create a new Python project (the orcher-sdk package)
+    #[command(alias = "py")]
+    Python {
+        /// Project name: lowercase letters, digits and hyphens
+        name: String,
+
+        /// Directory to create the project in
+        #[arg(short = 'd', long = "dir")]
+        directory: Option<String>,
+    },
+
+    /// Create a new TypeScript project (@orcher/sdk)
+    #[command(alias = "ts")]
+    Typescript {
+        /// Project name: lowercase letters, digits and hyphens
+        name: String,
+
+        /// Directory to create the project in
+        #[arg(short = 'd', long = "dir")]
+        directory: Option<String>,
+    },
+
+    /// Create a new Rust project (the orcher-sdk crate)
+    #[command(alias = "rs")]
+    Rust {
+        /// Project name: lowercase letters, digits and hyphens
+        name: String,
+
+        /// Directory to create the project in
+        #[arg(short = 'd', long = "dir")]
+        directory: Option<String>,
+    },
+
+    /// Add a workflow, with one task, to the project in this directory
     Workflow {
         /// Workflow name
         name: String,
 
-        /// Workflow type (sequential, parallel, dag)
+        /// Workflow type; only sequential is generated
         #[arg(short = 't', long = "type", default_value = "sequential")]
         workflow_type: String,
 
-        /// Output file
-        #[arg(short = 'o', long = "output")]
-        output: Option<String>,
+        /// File to write (default: one named after the workflow, where the
+        /// project keeps its source)
+        #[arg(short = 'f', long = "file")]
+        file: Option<String>,
+
+        /// Project language: python, typescript or rust (default: detected
+        /// from the project in this directory)
+        #[arg(short = 'l', long = "language")]
+        language: Option<String>,
     },
 }
 
