@@ -79,7 +79,7 @@ security-framework = "2.9"
 secret-service = "3.0"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.52", features = ["Win32_Security_Credentials"] }
+windows = { version = "0.52", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 
 [profile.release]
 strip = true

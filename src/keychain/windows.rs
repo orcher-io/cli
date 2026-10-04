@@ -3,7 +3,7 @@
 use crate::error::{CliError, Result};
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use windows::core::PWSTR;
 use windows::Win32::Security::Credentials::{
     CredDeleteW, CredEnumerateW, CredReadW, CredWriteW, CREDENTIALW, CREDENTIAL_ATTRIBUTEW,
