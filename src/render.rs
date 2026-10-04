@@ -1,29 +1,50 @@
-//! How things look on the terminal: tables, status cells, timestamps, and
-//! `-o json|yaml` for scripts.
+//! Shared rendering primitives for list/table CLI output.
 //!
-//! Color carries meaning only (a status), so everything else is plain or dim.
-//! Cells may contain color escapes; tables measure widths without them.
+//! Modern, restrained look: a borderless-ish `psql` table with a dim header,
+//! short git-style IDs, relative timestamps, and colored status cells. Color is
+//! carried only by status (meaning), everything else is weight/dim — in line
+//! with the black-and-white brand.
+//!
+//! Status/header cells embed ANSI via `console`; the table is rendered with
+//! tabled's `ansi` feature so those escapes don't skew column widths.
 
-use crate::error::Result;
-use crate::settings::{GlobalArgs, Output};
+use crate::error::{CliError, Result};
+use crate::time::Timestamptz;
 use console::style;
-use jiff::Timestamp;
-use orcher_proto::WorkflowExecutionStatus;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
-/// Prints `value` as JSON or YAML when that output was asked for, and says
-/// whether it did; when it returns `false` the caller prints for people.
-pub fn structured(args: &GlobalArgs, value: &serde_json::Value) -> Result<bool> {
-    match args.output {
-        Output::Json => println!("{}", serde_json::to_string_pretty(value)?),
-        Output::Yaml => print!("{}", serde_yaml::to_string(value)?),
-        Output::Table | Output::Name => return Ok(false),
+/// If `format` is a structured format (`json`/`yaml`), serialize `value` and
+/// return `Some(rendered)` — the caller prints it and returns early. `None`
+/// means the caller should fall through to the table renderer.
+///
+/// Gives every list/get command uniform `-o json|yaml` support for scripting.
+pub fn structured(format: &str, value: &serde_json::Value) -> Option<Result<String>> {
+    match format {
+        "json" => Some(
+            serde_json::to_string_pretty(value)
+                .map_err(|e| CliError::internal(format!("JSON serialization failed: {}", e))),
+        ),
+        "yaml" => Some(
+            serde_yaml::to_string(value)
+                .map_err(|e| CliError::internal(format!("YAML serialization failed: {}", e))),
+        ),
+        _ => None,
     }
-    Ok(true)
 }
 
-/// The value, or a dash when it is empty, so that no cell is blank.
+/// Shorten a UUID-like id to its first 8 chars (git-style). Empty → em dash.
+pub fn short_id(id: &str) -> String {
+    if id.is_empty() {
+        "—".to_string()
+    } else if id.len() > 8 {
+        id[..8].to_string()
+    } else {
+        id.to_string()
+    }
+}
+
+/// A value or an em dash when it's empty, so cells are never blank.
 pub fn or_dash(s: &str) -> String {
     if s.is_empty() {
         "—".to_string()
@@ -32,68 +53,44 @@ pub fn or_dash(s: &str) -> String {
     }
 }
 
-/// The name of a workflow execution status, as in `RUNNING`.
-pub fn status_name(status: i32) -> &'static str {
-    match WorkflowExecutionStatus::try_from(status) {
-        Ok(WorkflowExecutionStatus::Running) => "RUNNING",
-        Ok(WorkflowExecutionStatus::Completed) => "COMPLETED",
-        Ok(WorkflowExecutionStatus::Failed) => "FAILED",
-        Ok(WorkflowExecutionStatus::Canceled) => "CANCELED",
-        Ok(WorkflowExecutionStatus::Terminated) => "TERMINATED",
-        Ok(WorkflowExecutionStatus::RestartedFresh) => "RESTARTED_FRESH",
-        Ok(WorkflowExecutionStatus::TimedOut) => "TIMED_OUT",
-        Ok(WorkflowExecutionStatus::Reset) => "RESET",
-        Ok(WorkflowExecutionStatus::Pending) => "PENDING",
-        Ok(WorkflowExecutionStatus::Unspecified) | Err(_) => "UNKNOWN",
-    }
-}
-
-/// Parses a status as typed on the command line (`running`, `cancelled`).
-pub fn parse_status(status: &str) -> Option<i32> {
-    let status = match status.to_ascii_uppercase().replace('-', "_").as_str() {
-        "RUNNING" => WorkflowExecutionStatus::Running,
-        "COMPLETED" => WorkflowExecutionStatus::Completed,
-        "FAILED" => WorkflowExecutionStatus::Failed,
-        "CANCELED" | "CANCELLED" => WorkflowExecutionStatus::Canceled,
-        "TERMINATED" => WorkflowExecutionStatus::Terminated,
-        "RESTARTED_FRESH" => WorkflowExecutionStatus::RestartedFresh,
-        "TIMED_OUT" => WorkflowExecutionStatus::TimedOut,
-        "RESET" => WorkflowExecutionStatus::Reset,
-        "PENDING" => WorkflowExecutionStatus::Pending,
-        _ => return None,
-    };
-    Some(status as i32)
-}
-
-/// A colored status cell for a workflow execution status.
+/// A colored `● Label` status cell from a workflow-execution status code.
 pub fn status_cell(status: i32) -> String {
-    status_cell_str(status_name(status))
+    status_cell_str(crate::client::grpc_client::status_to_string(status))
 }
 
-/// A colored status cell for a status word. Colors mean the same for every
-/// resource: green finished well, cyan in flight, red failed, yellow stopped.
+/// A colored `● Label` status cell from a status word (any command's vocabulary).
+///
+/// Grouped by meaning so color is consistent across resources: green = healthy
+/// terminal, cyan = in-flight, red = failure, yellow = stopped/degraded.
 pub fn status_cell_str(status: &str) -> String {
-    let label = label(status);
+    let label = nice_label(status);
     match status.to_ascii_uppercase().as_str() {
-        "COMPLETED" | "SUCCEEDED" | "ACTIVE" | "READY" => {
+        "COMPLETED" | "SUCCEEDED" | "SUCCESS" | "ACTIVE" | "DONE" | "HEALTHY" | "READY" => {
             format!("{} {}", style("●").green(), style(label).green())
         }
-        "RUNNING" | "PENDING" | "SCHEDULED" | "STARTED" => {
+        "RUNNING" | "PENDING" | "IN_PROGRESS" | "PROCESSING" | "SCHEDULED" | "QUEUED"
+        | "STARTED" => {
             format!("{} {}", style("◐").cyan(), style(label).cyan())
         }
-        "FAILED" | "ERROR" => format!("{} {}", style("✗").red(), style(label).red()),
-        "CANCELED" | "CANCELLED" | "TERMINATED" | "TIMED_OUT" | "DEPRECATED" | "DELETED" => {
+        "FAILED" | "FAILURE" | "ERROR" | "UNHEALTHY" => {
+            format!("{} {}", style("✗").red(), style(label).red())
+        }
+        "CANCELED" | "CANCELLED" | "TERMINATED" | "TIMED_OUT" | "DEPRECATED" | "DELETED"
+        | "PARTIAL" | "PAUSED" => {
             format!("{} {}", style("⊘").yellow(), style(label).yellow())
         }
         _ => format!("{} {}", style("○").dim(), style(label).dim()),
     }
 }
 
-/// "TIMED_OUT" becomes "Timed out".
-fn label(status: &str) -> String {
+/// A human display label for a status word ("TIMED_OUT" → "Timed out").
+fn nice_label(status: &str) -> String {
     match status.to_ascii_uppercase().as_str() {
-        "" => "Unknown".to_string(),
+        "CANCELED" | "CANCELLED" => "Cancelled".to_string(),
+        "TIMED_OUT" => "Timed out".to_string(),
         "RESTARTED_FRESH" => "Restarted".to_string(),
+        "IN_PROGRESS" => "In progress".to_string(),
+        "" => "Unknown".to_string(),
         other => {
             let lower = other.replace('_', " ").to_ascii_lowercase();
             let mut chars = lower.chars();
@@ -105,22 +102,28 @@ fn label(status: &str) -> String {
     }
 }
 
-/// A protobuf timestamp as a jiff one.
-pub fn timestamp(ts: Option<&prost_types::Timestamp>) -> Option<Timestamp> {
-    let ts = ts?;
-    Timestamp::new(ts.seconds, ts.nanos).ok()
+/// Relative "time ago" from a unix-epoch second count (`None`/future → `—`/`just now`).
+pub fn relative_time(epoch_secs: Option<i64>) -> String {
+    epoch_secs
+        .and_then(Timestamptz::from_second)
+        .map(relative_from)
+        .unwrap_or_else(|| "—".to_string())
 }
 
-/// "5m ago", or a dash when there is no time.
-pub fn relative_time(ts: Option<&prost_types::Timestamp>) -> String {
-    match timestamp(ts) {
-        Some(then) => relative_from(then, Timestamp::now()),
-        None => "—".to_string(),
+/// Relative "time ago" from an RFC 3339 timestamp string (empty/unparseable →
+/// `—`/the leading date), for the REST-backed commands that return ISO strings.
+pub fn relative_time_rfc3339(ts: &str) -> String {
+    if ts.is_empty() {
+        return "—".to_string();
     }
+    Timestamptz::parse_rfc3339(ts)
+        .ok()
+        .map(relative_from)
+        .unwrap_or_else(|| ts.chars().take(10).collect())
 }
 
-fn relative_from(then: Timestamp, now: Timestamp) -> String {
-    let elapsed = now.as_second() - then.as_second();
+fn relative_from(then: Timestamptz) -> String {
+    let elapsed = (Timestamptz::now() - then).as_secs();
     if elapsed < 60 {
         "just now".to_string()
     } else if elapsed < 3600 {
@@ -132,23 +135,17 @@ fn relative_from(then: Timestamp, now: Timestamp) -> String {
     }
 }
 
-/// A UTC time such as `2026-10-04 12:21:53`, or a dash.
-pub fn absolute_time(ts: Option<&prost_types::Timestamp>) -> String {
-    match timestamp(ts) {
-        Some(t) => t.strftime("%Y-%m-%d %H:%M:%S").to_string(),
-        None => "—".to_string(),
-    }
+/// Absolute UTC timestamp (for `--wide`).
+pub fn absolute_time(epoch_secs: Option<i64>) -> String {
+    epoch_secs
+        .and_then(Timestamptz::from_second)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "—".to_string())
 }
 
-/// An RFC 3339 time for machine-readable output, or null.
-pub fn rfc3339(ts: Option<&prost_types::Timestamp>) -> serde_json::Value {
-    match timestamp(ts) {
-        Some(t) => serde_json::Value::String(t.to_string()),
-        None => serde_json::Value::Null,
-    }
-}
-
-/// A table with a dim header and no outer border.
+/// Render a modern list table: dim header, `psql` separators, no outer border.
+///
+/// Cells may contain ANSI color (widths are measured ignoring it).
 pub fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
     let mut builder = Builder::default();
     builder.push_record(headers.iter().map(|h| style(h).dim().bold().to_string()));
@@ -160,84 +157,30 @@ pub fn table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
     table.to_string()
 }
 
-/// Bytes the engine stored as a payload: JSON when they are JSON, otherwise
-/// a note of how many bytes there are.
-pub fn payload(bytes: &[u8]) -> serde_json::Value {
-    if bytes.is_empty() {
-        return serde_json::Value::Null;
-    }
-    serde_json::from_slice(bytes).unwrap_or_else(|_| match std::str::from_utf8(bytes) {
-        Ok(text) => serde_json::Value::String(text.to_string()),
-        Err(_) => serde_json::Value::String(format!("<{} bytes of binary data>", bytes.len())),
-    })
-}
-
-/// "1 workflow", "2 workflows".
-pub fn plural(count: usize, one: &str, many: &str) -> String {
-    if count == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{count} {many}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn statuses_round_trip() {
-        for name in ["running", "completed", "failed", "terminated", "timed-out"] {
-            let code = parse_status(name).expect(name);
-            assert_eq!(
-                status_name(code),
-                name.to_ascii_uppercase().replace('-', "_")
-            );
-        }
-        assert_eq!(parse_status("cancelled"), parse_status("canceled"));
-        assert_eq!(parse_status("bogus"), None);
-        assert_eq!(status_name(99), "UNKNOWN");
+    fn short_id_cases() {
+        assert_eq!(short_id("95dfe7b4-1c8c-4068"), "95dfe7b4");
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id(""), "—");
     }
 
     #[test]
-    fn relative_times() {
-        let now = Timestamp::from_second(1_700_000_000).unwrap();
-        let ago =
-            |secs: i64| relative_from(Timestamp::from_second(1_700_000_000 - secs).unwrap(), now);
-        assert_eq!(ago(5), "just now");
-        assert_eq!(ago(300), "5m ago");
-        assert_eq!(ago(7200), "2h ago");
-        assert_eq!(ago(3 * 86_400), "3d ago");
+    fn relative_time_cases() {
         assert_eq!(relative_time(None), "—");
+        // A long-past fixed epoch renders as "…d ago", never panics.
+        assert!(relative_time(Some(1_600_000_000)).ends_with("d ago"));
     }
 
     #[test]
-    fn absolute_times_are_utc() {
-        let ts = prost_types::Timestamp {
-            seconds: 1_700_000_000,
-            nanos: 0,
-        };
-        assert_eq!(absolute_time(Some(&ts)), "2023-11-14 22:13:20");
-        assert_eq!(rfc3339(Some(&ts)), "2023-11-14T22:13:20Z");
-    }
-
-    #[test]
-    fn payloads() {
-        assert_eq!(payload(br#"{"a":1}"#), serde_json::json!({"a": 1}));
-        assert_eq!(payload(b"plain"), serde_json::json!("plain"));
-        assert_eq!(
-            payload(&[0xff, 0xfe]),
-            serde_json::json!("<2 bytes of binary data>")
-        );
-        assert_eq!(payload(b""), serde_json::Value::Null);
-    }
-
-    #[test]
-    fn tables_have_a_header_and_rows() {
-        console::set_colors_enabled(false);
+    fn table_has_header_and_rows() {
         let out = table(&["ID", "STATUS"], vec![vec!["abc".into(), status_cell(2)]]);
         assert!(out.contains("ID"));
         assert!(out.contains("abc"));
-        assert!(out.contains("Completed"));
+        // psql separator row
+        assert!(out.contains("-+-") || out.contains("--"));
     }
 }

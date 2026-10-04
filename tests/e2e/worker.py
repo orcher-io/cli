@@ -22,6 +22,14 @@ async def hello(ctx: WorkflowContext, name: str) -> dict:
     return {"greeting": greeting}
 
 
+@workflow(name="greet_params")
+async def greet_params(ctx: WorkflowContext, name: str, times: int = 1) -> dict:
+    """Takes `orcher run`'s key=value parameters, which arrive as keyword
+    arguments."""
+    greeting = await ctx.execute_task(greet, name=name)
+    return {"greeting": greeting, "times": times}
+
+
 @workflow(name="approval")
 async def approval(ctx: WorkflowContext) -> dict:
     """Waits for an `approve` event and completes with its payload."""

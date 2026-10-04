@@ -1,42 +1,40 @@
-//! `orcher workflow`: inspect and control workflow executions.
+//! `orcher workflow` — list, get, cancel, terminate, event, and history.
 
-use crate::client::Client;
-use crate::commands::confirm;
-use crate::error::{Error, Result};
+use crate::client::grpc_client::{status_to_string, string_to_status, DEFAULT_GRPC_PORT};
+use crate::config::Config;
+use crate::error::{CliError, Result};
 use crate::render;
-use crate::settings::{GlobalArgs, Output};
+use crate::time::Timestamptz;
+use crate::utils::GlobalConfig;
 use clap::{Args, Subcommand};
 use console::style;
-use orcher_proto::get_workflow_status_response::Outcome;
-use orcher_proto::{get_workflow_result_response, EntryType, StartWorkflowRequest};
-use std::path::PathBuf;
 use std::time::Duration;
+use tracing::info;
 
+/// Workflow management command
 #[derive(Args)]
 #[command(after_help = "\
-Examples:
-  orcher workflow start order --task-queue orders --input '{\"id\": 1001}'
-  orcher workflow start order --id order-1001 --wait   Start it and print its result
-  orcher workflow result order-1001             Wait for a workflow's result
-  orcher workflow list                          Recent executions
-  orcher workflow list --status running         Only the running ones
-  orcher workflow describe order-1001           Status, outcome and pending work
-  orcher workflow history order-1001            Everything the engine recorded
-  orcher workflow cancel order-1001 --yes       Ask it to stop")]
+EXAMPLES:
+  orcher workflow list                        List recent executions
+  orcher workflow list -s running --limit 20  Filter by status
+  orcher workflow list -o json                Machine-readable output
+  orcher workflow get <workflow-id> --full    Full details incl. pending work
+  orcher workflow cancel <workflow-id>        Request cancellation
+  orcher workflow history <workflow-id>       Show the execution journal")]
 pub struct WorkflowCommand {
     #[command(subcommand)]
-    action: Action,
+    pub action: WorkflowCommands,
 }
 
 #[derive(Subcommand)]
-enum Action {
+pub enum WorkflowCommands {
     /// Start a workflow
     Start {
         /// The workflow type, as the worker registered it
         workflow_type: String,
 
         /// The task queue its worker polls
-        #[arg(long, default_value = "default")]
+        #[arg(long = "task-queue", default_value = "default")]
         task_queue: String,
 
         /// The workflow id; the engine makes one up when it is omitted
@@ -44,15 +42,15 @@ enum Action {
         workflow_id: Option<String>,
 
         /// The workflow's input, as JSON
-        #[arg(short, long)]
+        #[arg(short = 'i', long = "input")]
         input: Option<String>,
 
         /// Read the input JSON from a file, or from stdin with -
-        #[arg(long, conflicts_with = "input")]
-        input_file: Option<PathBuf>,
+        #[arg(long = "input-file", conflicts_with = "input")]
+        input_file: Option<std::path::PathBuf>,
 
         /// Wait for the workflow to finish and print its result
-        #[arg(short, long)]
+        #[arg(short = 'w', long = "wait")]
         wait: bool,
 
         /// With --wait, how long to wait: seconds, or a duration such as 5m
@@ -62,10 +60,11 @@ enum Action {
 
     /// Wait for a workflow to finish and print its result
     Result {
+        /// Workflow ID
         workflow_id: String,
 
-        /// A specific run, rather than the latest
-        #[arg(short, long)]
+        /// Specific execution/run ID
+        #[arg(short = 'e', long = "execution-id")]
         execution_id: Option<String>,
 
         /// How long to wait: seconds, or a duration such as 5m
@@ -73,118 +72,142 @@ enum Action {
         timeout: Duration,
     },
 
+    /// Show the tasks a workflow ran: status, attempts and time taken
+    Tasks {
+        /// Workflow ID
+        workflow_id: String,
+
+        /// Specific execution/run ID
+        #[arg(short = 'e', long = "execution-id")]
+        execution_id: Option<String>,
+
+        /// Maximum number of tasks to show
+        #[arg(short = 'l', long = "limit", default_value = "100")]
+        limit: i32,
+    },
+
     /// List workflow executions
-    #[command(alias = "ls")]
+    #[command(aliases = ["ls"])]
     List {
-        /// Only workflows of this type
+        /// Filter by workflow type/name
         #[arg(short = 't', long = "type")]
         workflow_type: Option<String>,
 
-        /// Only workflows in this status: running, completed, failed,
-        /// canceled, terminated, timed-out
-        #[arg(short, long)]
+        /// Filter by status (running, completed, failed, cancelled)
+        #[arg(short = 's', long = "status")]
         status: Option<String>,
 
-        /// Search with a query instead of filters
-        #[arg(long, conflicts_with_all = ["workflow_type", "status"])]
-        query: Option<String>,
-
-        /// How many to show
-        #[arg(short, long, default_value_t = 50)]
+        /// Maximum number of results to return
+        #[arg(short = 'l', long = "limit", default_value = "50")]
         limit: i32,
 
-        /// Show full ids and absolute times
-        #[arg(long)]
+        /// Show all namespaces
+        #[arg(short = 'A', long = "all-namespaces")]
+        all_namespaces: bool,
+
+        /// Advanced query filter (SQL-like syntax)
+        #[arg(long = "query")]
+        query: Option<String>,
+
+        /// Show full IDs and absolute timestamps
+        #[arg(long = "wide")]
         wide: bool,
     },
 
-    /// Show a workflow's status, outcome and pending work
-    #[command(alias = "get")]
-    Describe {
+    /// Get detailed information about a workflow execution
+    #[command(aliases = ["describe", "info"])]
+    Get {
+        /// Workflow execution ID or workflow_id
         workflow_id: String,
 
-        /// A specific run, rather than the latest
-        #[arg(short, long)]
+        /// Specific execution/run ID
+        #[arg(short = 'e', long = "execution-id")]
         execution_id: Option<String>,
+
+        /// Show full execution details including parameters
+        #[arg(long = "full")]
+        full: bool,
     },
 
-    /// Ask a workflow to stop; it can clean up before it ends
+    /// Cancel a running workflow execution
     Cancel {
+        /// Workflow execution ID to cancel
         workflow_id: String,
 
-        /// A specific run, rather than the latest
-        #[arg(short, long)]
+        /// Specific execution/run ID
+        #[arg(short = 'e', long = "execution-id")]
         execution_id: Option<String>,
 
-        /// Why, for the record
-        #[arg(short, long, default_value = "")]
-        reason: String,
+        /// Reason for cancellation
+        #[arg(short = 'r', long = "reason")]
+        reason: Option<String>,
 
-        /// Do not ask for confirmation
-        #[arg(short = 'y', long)]
-        yes: bool,
+        /// Skip confirmation prompt
+        #[arg(short = 'f', long = "force", visible_alias = "yes", short_alias = 'y')]
+        force: bool,
     },
 
-    /// Stop a workflow at once, without letting it clean up
-    Terminate {
+    /// View execution history/journal for a workflow
+    #[command(aliases = ["journal", "events"])]
+    History {
+        /// Workflow execution ID
         workflow_id: String,
 
-        /// A specific run, rather than the latest
-        #[arg(short, long)]
+        /// Specific execution/run ID
+        #[arg(short = 'e', long = "execution-id")]
         execution_id: Option<String>,
 
-        /// Why, for the record
-        #[arg(short, long, default_value = "terminated from the CLI")]
+        /// Maximum number of events to show
+        #[arg(short = 'l', long = "limit", default_value = "100")]
+        limit: i32,
+
+        /// Output in compact format
+        #[arg(long = "compact")]
+        compact: bool,
+    },
+
+    /// Terminate a workflow execution immediately
+    Terminate {
+        /// Workflow execution ID to terminate
+        workflow_id: String,
+
+        /// Specific execution/run ID
+        #[arg(short = 'e', long = "execution-id")]
+        execution_id: Option<String>,
+
+        /// Reason for termination
+        #[arg(short = 'r', long = "reason", default_value = "Terminated via CLI")]
         reason: String,
 
-        /// Do not ask for confirmation
-        #[arg(short = 'y', long)]
-        yes: bool,
+        /// Skip confirmation prompt
+        #[arg(short = 'f', long = "force", visible_alias = "yes", short_alias = 'y')]
+        force: bool,
     },
 
     /// Send an event to a running workflow
     Event {
+        /// Workflow execution ID
         workflow_id: String,
 
-        /// The event name the workflow waits for
-        event_name: String,
+        /// Event name to send. `-n` would clash with the global --namespace,
+        /// so the name is positional (`--name` still works).
+        #[arg(value_name = "EVENT", required_unless_present = "event_name_flag")]
+        event_name: Option<String>,
 
-        /// The event's payload, as JSON
-        #[arg(short, long)]
+        /// Event name to send (same as the positional EVENT)
+        #[arg(long = "name", conflicts_with = "event_name", hide = true)]
+        event_name_flag: Option<String>,
+
+        /// Event payload as JSON string
+        #[arg(short = 'p', long = "payload")]
         payload: Option<String>,
-    },
-
-    /// Show the journal: every step the engine recorded
-    #[command(alias = "events")]
-    History {
-        workflow_id: String,
-
-        /// A specific run, rather than the latest
-        #[arg(short, long)]
-        execution_id: Option<String>,
-
-        /// How many entries to show
-        #[arg(short, long, default_value_t = 100)]
-        limit: i32,
-    },
-
-    /// Show the tasks a workflow ran: status, attempts and time taken
-    Tasks {
-        workflow_id: String,
-
-        /// A specific run, rather than the latest
-        #[arg(short, long)]
-        execution_id: Option<String>,
-
-        /// How many tasks to show
-        #[arg(short, long, default_value_t = 100)]
-        limit: i32,
     },
 }
 
-pub async fn run(cmd: WorkflowCommand, args: &GlobalArgs) -> Result<()> {
+/// Execute workflow management command
+pub async fn execute(cmd: WorkflowCommand, global_config: &GlobalConfig) -> Result<()> {
     match cmd.action {
-        Action::Start {
+        WorkflowCommands::Start {
             workflow_type,
             task_queue,
             workflow_id,
@@ -194,96 +217,694 @@ pub async fn run(cmd: WorkflowCommand, args: &GlobalArgs) -> Result<()> {
             timeout,
         } => {
             let input = match (input, input_file) {
-                (Some(text), _) => json_bytes(&text, "--input")?,
-                (None, Some(path)) => json_bytes(&read_input(&path)?, "--input-file")?,
-                (None, None) => Vec::new(),
+                (Some(text), _) => Some(json_bytes(&text, "--input")?),
+                (None, Some(path)) => Some(json_bytes(&read_input(&path)?, "--input-file")?),
+                (None, None) => None,
             };
-            let request = StartWorkflowRequest {
-                workflow_type,
-                task_queue,
-                workflow_id: workflow_id.unwrap_or_default(),
+            start_workflow(
+                &workflow_type,
+                workflow_id.as_deref(),
+                &task_queue,
                 input,
-                ..Default::default()
-            };
-            start(request, wait.then_some(timeout), args).await
+                wait.then_some(timeout),
+                global_config,
+            )
+            .await
         }
-        Action::Result {
+        WorkflowCommands::Result {
             workflow_id,
             execution_id,
             timeout,
         } => {
-            let mut client = Client::connect(args).await?;
-            result(
+            let mut client = crate::client::connection::connect_grpc(global_config).await?;
+            workflow_result(
                 &mut client,
                 &workflow_id,
                 execution_id.as_deref(),
                 timeout,
-                args,
+                global_config,
             )
             .await
         }
-        Action::List {
+        WorkflowCommands::Tasks {
+            workflow_id,
+            execution_id,
+            limit,
+        } => {
+            let mut client = crate::client::connection::connect_grpc(global_config).await?;
+            let tasks = client
+                .get_task_executions(&workflow_id, execution_id.as_deref(), limit)
+                .await?
+                .tasks;
+            crate::commands::logs::display_task_executions(&tasks, global_config)
+        }
+        WorkflowCommands::List {
             workflow_type,
             status,
-            query,
             limit,
+            all_namespaces,
+            query,
             wide,
-        } => list(workflow_type, status, query, limit, wide, args).await,
-        Action::Describe {
+        } => {
+            list_workflows(
+                workflow_type,
+                status,
+                limit,
+                all_namespaces,
+                query,
+                wide,
+                global_config,
+            )
+            .await
+        }
+        WorkflowCommands::Get {
             workflow_id,
             execution_id,
-        } => describe(&workflow_id, execution_id.as_deref(), args).await,
-        Action::Cancel {
+            full,
+        } => get_workflow(workflow_id, execution_id, full, global_config).await,
+        WorkflowCommands::Cancel {
             workflow_id,
             execution_id,
             reason,
-            yes,
-        } => cancel(&workflow_id, execution_id.as_deref(), &reason, yes, args).await,
-        Action::Terminate {
+            force,
+        } => cancel_workflow(workflow_id, execution_id, reason, force, global_config).await,
+        WorkflowCommands::History {
+            workflow_id,
+            execution_id,
+            limit,
+            compact,
+        } => get_workflow_history(workflow_id, execution_id, limit, compact, global_config).await,
+        WorkflowCommands::Terminate {
             workflow_id,
             execution_id,
             reason,
-            yes,
-        } => terminate(&workflow_id, execution_id.as_deref(), &reason, yes, args).await,
-        Action::Event {
+            force,
+        } => terminate_workflow(workflow_id, execution_id, reason, force, global_config).await,
+        WorkflowCommands::Event {
             workflow_id,
             event_name,
+            event_name_flag,
             payload,
-        } => event(&workflow_id, &event_name, payload, args).await,
-        Action::History {
-            workflow_id,
-            execution_id,
-            limit,
-        } => history(&workflow_id, execution_id.as_deref(), limit, args).await,
-        Action::Tasks {
-            workflow_id,
-            execution_id,
-            limit,
-        } => tasks(&workflow_id, execution_id.as_deref(), limit, args).await,
+        } => {
+            let event_name = event_name.or(event_name_flag).unwrap_or_default();
+            send_event_to_workflow(workflow_id, event_name, payload, global_config).await
+        }
     }
 }
 
-async fn start(
-    request: StartWorkflowRequest,
-    wait: Option<Duration>,
-    args: &GlobalArgs,
+fn get_grpc_address(global_config: &GlobalConfig) -> Result<String> {
+    if let Ok(config) = Config::load() {
+        let context_name = global_config
+            .profile
+            .as_deref()
+            .unwrap_or(&config.current_context);
+
+        if let Some(ctx) = config.contexts.get(context_name) {
+            // Parse the server URL and extract host, use gRPC port
+            if let Ok(url) = url::Url::parse(&ctx.server) {
+                let host = url.host_str().unwrap_or("localhost");
+                return Ok(format!("http://{}:{}", host, DEFAULT_GRPC_PORT));
+            }
+        }
+    }
+
+    // Default to localhost
+    Ok(format!("http://localhost:{}", DEFAULT_GRPC_PORT))
+}
+
+fn get_namespace(global_config: &GlobalConfig) -> String {
+    global_config
+        .namespace
+        .clone()
+        .unwrap_or_else(|| "default".to_string())
+}
+
+/// List workflow executions
+async fn list_workflows(
+    workflow_type: Option<String>,
+    status: Option<String>,
+    limit: i32,
+    _all_namespaces: bool,
+    query: Option<String>,
+    wide: bool,
+    global_config: &GlobalConfig,
 ) -> Result<()> {
-    let mut client = Client::connect(args).await?;
-    let started = client.start_workflow(request).await?;
+    info!("Listing workflow executions");
+
+    // Try to connect to gRPC server
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    // Convert status string to enum value
+    // An unknown status is an error rather than silently no filter at all.
+    let status_filter = match &status {
+        Some(s) => Some(string_to_status(s).ok_or_else(|| {
+            CliError::invalid_input(format!(
+                "Unknown status '{}'. Use running, completed, failed, canceled, terminated, timed_out or pending",
+                s
+            ))
+        })?),
+        None => None,
+    };
+
+    // Use search if query is provided, otherwise list
+    let (workflows, has_more) = if let Some(q) = query {
+        let response = client.search_workflows(&q, limit, None).await?;
+        (response.executions, !response.next_page_token.is_empty())
+    } else {
+        let response = client
+            .list_workflows(workflow_type.as_deref(), status_filter, limit, None)
+            .await?;
+        (response.executions, !response.next_page_token.is_empty())
+    };
+
+    if workflows.is_empty() {
+        println!("{}", style("No workflows found").yellow());
+        if let Some(wt) = &workflow_type {
+            println!("  Filter: type={}", wt);
+        }
+        if let Some(s) = &status {
+            println!("  Filter: status={}", s);
+        }
+        return Ok(());
+    }
+
+    // Structured output (-o json/yaml) for scripting.
+    let items = serde_json::Value::Array(
+        workflows
+            .iter()
+            .map(|wf| {
+                serde_json::json!({
+                    "workflowId": wf.workflow_id,
+                    "type": wf.workflow_type,
+                    "status": status_to_string(wf.status),
+                    "startedAt": wf.start_time.as_ref().map(|t| t.seconds),
+                })
+            })
+            .collect(),
+    );
+    if let Some(out) = render::structured(&global_config.output_format, &items) {
+        println!("{}", out?);
+        return Ok(());
+    }
+
+    // `-o name` and quiet mode print bare IDs for piping.
+    if global_config.output_format == "name" || global_config.quiet {
+        for wf in &workflows {
+            println!("{}", wf.workflow_id);
+        }
+        return Ok(());
+    }
+
+    // Table view. `--wide` (or `-o wide`) shows full IDs and absolute timestamps.
+    let wide = wide || global_config.output_format == "wide";
+    let rows: Vec<Vec<String>> = workflows
+        .iter()
+        .map(|wf| {
+            let id = if wide {
+                render::or_dash(&wf.workflow_id)
+            } else {
+                render::short_id(&wf.workflow_id)
+            };
+            let started = if wide {
+                render::absolute_time(wf.start_time.as_ref().map(|t| t.seconds))
+            } else {
+                render::relative_time(wf.start_time.as_ref().map(|t| t.seconds))
+            };
+            vec![
+                id,
+                render::or_dash(&wf.workflow_type),
+                render::status_cell(wf.status),
+                started,
+            ]
+        })
+        .collect();
+
+    println!();
+    println!(
+        "{}",
+        render::table(&["WORKFLOW ID", "TYPE", "STATUS", "STARTED"], rows)
+    );
+    println!();
+
+    let count = format!(
+        "{} workflow{}",
+        workflows.len(),
+        if workflows.len() == 1 { "" } else { "s" }
+    );
+    let hint = if wide {
+        ""
+    } else {
+        "  ·  --wide for full IDs"
+    };
+    println!("  {}{}", style(count).dim(), style(hint).dim());
+    if has_more {
+        println!("  {}", style("more available — raise --limit").dim());
+    }
+
+    Ok(())
+}
+
+/// Get detailed workflow information
+async fn get_workflow(
+    workflow_id: String,
+    execution_id: Option<String>,
+    full: bool,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!("Getting workflow details: {}", workflow_id);
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    // Get workflow status first
+    let status_response = client
+        .get_workflow_status(&workflow_id, execution_id.as_deref())
+        .await?;
+
+    // Describe by the execution the status names: engines up to at least
+    // 0.5.5 match a bare workflow id against the workflow type instead, and
+    // find nothing.
+    let resolved_execution_id = status_response
+        .execution
+        .as_ref()
+        .map(|e| e.execution_id.clone())
+        .filter(|id| !id.is_empty())
+        .or_else(|| execution_id.clone());
+
+    // Structured output (-o json/yaml) for scripting.
+    if global_config.is_structured_output() {
+        let exec = status_response.execution.as_ref();
+        let mut obj = serde_json::json!({
+            "workflowId": exec.map(|e| e.workflow_id.as_str()).unwrap_or(&workflow_id),
+            "executionId": exec.map(|e| e.execution_id.as_str()),
+            "status": status_to_string(status_response.status),
+            "startedAt": status_response.started_at.as_ref().map(|t| t.seconds),
+            "completedAt": status_response.completed_at.as_ref().map(|t| t.seconds),
+        });
+        match &status_response.outcome {
+            Some(orcher_proto::get_workflow_status_response::Outcome::Result(r)) => {
+                obj["result"] = serde_json::from_slice(r).unwrap_or(serde_json::Value::Null);
+            }
+            Some(orcher_proto::get_workflow_status_response::Outcome::Error(e)) => {
+                obj["error"] = serde_json::json!(e);
+            }
+            None => {}
+        }
+        if full {
+            if let Ok(d) = client
+                .describe_workflow(&workflow_id, resolved_execution_id.as_deref())
+                .await
+            {
+                if let Some(info) = &d.execution_info {
+                    obj["taskQueue"] = serde_json::json!(info.task_queue);
+                    obj["namespace"] = serde_json::json!(info.namespace);
+                    obj["attempt"] = serde_json::json!(info.attempt);
+                    if !info.cron_schedule.is_empty() {
+                        obj["cronSchedule"] = serde_json::json!(info.cron_schedule);
+                    }
+                }
+                obj["pendingTasks"] = serde_json::json!(d.pending_tasks);
+                obj["pendingTimers"] = serde_json::json!(d.pending_timers);
+                obj["pendingEvents"] = serde_json::json!(d.pending_events);
+            }
+        }
+        if let Some(out) = render::structured(&global_config.output_format, &obj) {
+            println!("{}", out?);
+            return Ok(());
+        }
+    }
+
+    println!();
+    println!("{}", style("Workflow Details").bold());
+    println!("{}", style("-".repeat(50)).dim());
+
+    // Basic info
+    if let Some(exec) = &status_response.execution {
+        println!("  Workflow ID:  {}", style(&exec.workflow_id).cyan());
+        println!("  Execution ID: {}", style(&exec.execution_id).dim());
+    } else {
+        println!("  Workflow ID:  {}", style(&workflow_id).cyan());
+    }
+
+    let status_str = status_to_string(status_response.status);
+    let status_styled = match status_str {
+        "RUNNING" => style(status_str).cyan().bold(),
+        "COMPLETED" => style(status_str).green().bold(),
+        "FAILED" => style(status_str).red().bold(),
+        _ => style(status_str).yellow().bold(),
+    };
+    println!("  Status:       {}", status_styled);
+
+    if let Some(started) = &status_response.started_at {
+        let dt = Timestamptz::from_second(started.seconds)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!("  Started:      {}", dt);
+    }
+
+    if let Some(completed) = &status_response.completed_at {
+        let dt = Timestamptz::from_second(completed.seconds)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!("  Completed:    {}", dt);
+    }
+
+    // Show outcome if available
+    if let Some(outcome) = &status_response.outcome {
+        println!();
+        match outcome {
+            orcher_proto::get_workflow_status_response::Outcome::Result(result) => {
+                println!("{}", style("Result:").bold());
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(result) {
+                    println!(
+                        "  {}",
+                        serde_json::to_string_pretty(&json).unwrap_or_else(|_| "-".to_string())
+                    );
+                } else {
+                    println!("  (binary data, {} bytes)", result.len());
+                }
+            }
+            orcher_proto::get_workflow_status_response::Outcome::Error(error) => {
+                println!("{}", style("Error:").red().bold());
+                println!("  {}", error);
+            }
+        }
+    }
+
+    // If full details requested, get describe info
+    if full {
+        if let Ok(describe) = client
+            .describe_workflow(&workflow_id, resolved_execution_id.as_deref())
+            .await
+        {
+            println!();
+            println!("{}", style("Execution Details").bold());
+            println!("{}", style("-".repeat(50)).dim());
+
+            if let Some(info) = &describe.execution_info {
+                println!("  Task Queue:   {}", info.task_queue);
+                println!("  Namespace:    {}", info.namespace);
+                println!("  Attempt:      {}", info.attempt);
+
+                if !info.cron_schedule.is_empty() {
+                    println!("  Cron:         {}", info.cron_schedule);
+                }
+            }
+
+            println!("  Pending Tasks:  {}", describe.pending_tasks);
+            println!("  Pending Timers: {}", describe.pending_timers);
+            println!("  Pending Events: {}", describe.pending_events);
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Cancel a running workflow
+async fn cancel_workflow(
+    workflow_id: String,
+    execution_id: Option<String>,
+    reason: Option<String>,
+    force: bool,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!("Cancelling workflow: {}", workflow_id);
+
+    // Confirm action unless forced
+    if !force {
+        let confirmed =
+            super::common::confirm_action(&format!("Cancel workflow '{}'?", workflow_id), force)?;
+        if !confirmed {
+            println!("Cancellation aborted.");
+            return Ok(());
+        }
+    }
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let result = client
+        .cancel_workflow(&workflow_id, execution_id.as_deref(), reason.as_deref())
+        .await?;
+
+    if result {
+        println!(
+            "{} Workflow '{}' cancellation requested",
+            style("✓").green(),
+            workflow_id
+        );
+    } else {
+        println!(
+            "{} Failed to cancel workflow '{}'",
+            style("✗").red(),
+            workflow_id
+        );
+    }
+
+    Ok(())
+}
+
+/// Get workflow execution journal
+async fn get_workflow_history(
+    workflow_id: String,
+    execution_id: Option<String>,
+    limit: i32,
+    compact: bool,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!("Getting execution journal: {}", workflow_id);
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let response = client
+        .get_execution_journal(&workflow_id, execution_id.as_deref(), limit, None)
+        .await?;
+
+    let entries = response.journal;
+
+    // Structured output (-o json/yaml) for scripting.
+    let items = serde_json::Value::Array(
+        entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "id": entry.entry_id,
+                    "type": entry_type_name(entry.entry_type),
+                    "taskId": entry.task_id,
+                    "timestamp": entry.timestamp.as_ref().map(|t| t.seconds),
+                })
+            })
+            .collect(),
+    );
+    if let Some(out) = render::structured(&global_config.output_format, &items) {
+        println!("{}", out?);
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("{}", style("No history entries found").yellow());
+        return Ok(());
+    }
+
+    println!();
+    println!("{} ({})", style("Execution Journal").bold(), workflow_id);
+    println!("{}", style("-".repeat(100)).dim());
+
+    if compact {
+        // Compact format
+        println!(
+            "{:<6}  {:<40}  {:<25}",
+            style("ID").bold(),
+            style("ENTRY TYPE").bold(),
+            style("TIMESTAMP").bold()
+        );
+        println!("{}", style("-".repeat(75)).dim());
+
+        for entry in &entries {
+            let timestamp = entry
+                .timestamp
+                .as_ref()
+                .map(|t| {
+                    Timestamptz::from_second(t.seconds)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                })
+                .unwrap_or_else(|| "-".to_string());
+
+            let entry_type = entry_type_name(entry.entry_type);
+            println!(
+                "{:<6}  {:<40}  {:<25}",
+                entry.entry_id, entry_type, timestamp,
+            );
+        }
+    } else {
+        // Full format with details
+        for entry in &entries {
+            let timestamp = entry
+                .timestamp
+                .as_ref()
+                .map(|t| {
+                    Timestamptz::from_second(t.seconds)
+                        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                })
+                .unwrap_or_else(|| "-".to_string());
+
+            let entry_type = entry_type_name(entry.entry_type);
+
+            // Color-code entry types
+            let entry_styled = if entry_type.contains("COMPLETED") {
+                style(&entry_type).green()
+            } else if entry_type.contains("FAILED") || entry_type.contains("TIMED_OUT") {
+                style(&entry_type).red()
+            } else if entry_type.contains("STARTED") {
+                style(&entry_type).cyan()
+            } else {
+                style(&entry_type).white()
+            };
+
+            println!(
+                "{} {} {}",
+                style(format!("[{}]", entry.entry_id)).dim(),
+                entry_styled,
+                style(timestamp).dim(),
+            );
+        }
+    }
+
+    println!();
+    println!("{} journal entries", entries.len());
+
+    if !response.next_page_token.is_empty() {
+        println!(
+            "{}",
+            style("More entries available. Use --limit to increase page size.").dim()
+        );
+    }
+
+    Ok(())
+}
+
+/// Terminate a workflow immediately
+async fn terminate_workflow(
+    workflow_id: String,
+    execution_id: Option<String>,
+    reason: String,
+    force: bool,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!("Terminating workflow: {}", workflow_id);
+
+    // Confirm action unless forced
+    if !force {
+        let confirmed = super::common::confirm_action(
+            &format!(
+                "Terminate workflow '{}'? This will immediately stop the workflow.",
+                workflow_id
+            ),
+            force,
+        )?;
+        if !confirmed {
+            println!("Termination aborted.");
+            return Ok(());
+        }
+    }
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let result = client
+        .terminate_workflow(&workflow_id, execution_id.as_deref(), &reason)
+        .await?;
+
+    if result {
+        println!(
+            "{} Workflow '{}' terminated",
+            style("✓").green(),
+            workflow_id
+        );
+    } else {
+        println!(
+            "{} Failed to terminate workflow '{}'",
+            style("✗").red(),
+            workflow_id
+        );
+    }
+
+    Ok(())
+}
+
+/// Send an event to a workflow
+async fn send_event_to_workflow(
+    workflow_id: String,
+    event_name: String,
+    payload: Option<String>,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!(
+        "Sending event '{}' to workflow: {}",
+        event_name, workflow_id
+    );
+
+    // Parse payload if provided
+    let payload_bytes = if let Some(p) = &payload {
+        // Validate it's valid JSON
+        let _: serde_json::Value = serde_json::from_str(p)
+            .map_err(|e| CliError::invalid_input(format!("Invalid JSON payload: {}", e)))?;
+        Some(p.as_bytes().to_vec())
+    } else {
+        None
+    };
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let result = client
+        .send_event(&workflow_id, &event_name, payload_bytes)
+        .await?;
+
+    if result {
+        println!(
+            "{} Event '{}' sent to workflow '{}'",
+            style("✓").green(),
+            event_name,
+            workflow_id
+        );
+    } else {
+        println!(
+            "{} Failed to send event to workflow '{}'",
+            style("✗").red(),
+            workflow_id
+        );
+    }
+
+    Ok(())
+}
+
+/// Start a workflow, and with `wait`, wait for its result.
+async fn start_workflow(
+    workflow_type: &str,
+    workflow_id: Option<&str>,
+    task_queue: &str,
+    input: Option<Vec<u8>>,
+    wait: Option<Duration>,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+    let started = client
+        .start_workflow(workflow_type, workflow_id, task_queue, input)
+        .await?;
 
     if let Some(timeout) = wait {
-        if !args.quiet && !args.is_structured() {
+        if !global_config.quiet && !global_config.is_structured_output() {
             eprintln!(
-                "Started {} (execution {}); waiting for it to finish…",
+                "Started {} (execution {}); waiting for it to finish...",
                 started.workflow_id, started.execution_id
             );
         }
-        return result(
+        return workflow_result(
             &mut client,
             &started.workflow_id,
             Some(&started.execution_id),
             timeout,
-            args,
+            global_config,
         )
         .await;
     }
@@ -291,24 +912,26 @@ async fn start(
     let value = serde_json::json!({
         "workflowId": started.workflow_id,
         "executionId": started.execution_id,
-        "startedAt": render::rfc3339(started.started_at.as_ref()),
+        "startedAt": started.started_at.as_ref().map(|t| t.seconds),
     });
-    if render::structured(args, &value)? {
+    if let Some(out) = render::structured(&global_config.output_format, &value) {
+        println!("{}", out?);
         return Ok(());
     }
-    if args.output == Output::Name || args.quiet {
+    if global_config.output_format == "name" || global_config.quiet {
         println!("{}", started.workflow_id);
         return Ok(());
     }
     println!(
-        "Started {} (execution {}).",
-        style(&started.workflow_id).bold(),
+        "{} Started {} (execution {})",
+        style("✓").green(),
+        style(&started.workflow_id).cyan(),
         started.execution_id
     );
     println!(
         "{}",
         style(format!(
-            "Wait for its result with `orcher workflow result {}`.",
+            "Wait for its result with: orcher workflow result {}",
             started.workflow_id
         ))
         .dim()
@@ -316,15 +939,17 @@ async fn start(
     Ok(())
 }
 
-/// Waits for a workflow and prints its result. A workflow that did not
+/// Wait for a workflow and print its result. A workflow that did not
 /// complete is an error, so that the exit status says how it ended.
-async fn result(
-    client: &mut Client,
+async fn workflow_result(
+    client: &mut crate::client::grpc_client::OrcherGrpcClient,
     workflow_id: &str,
     execution_id: Option<&str>,
     timeout: Duration,
-    args: &GlobalArgs,
+    global_config: &GlobalConfig,
 ) -> Result<()> {
+    use orcher_proto::get_workflow_result_response::Outcome as ResultOutcome;
+
     let response = client
         .get_workflow_result(workflow_id, execution_id, timeout)
         .await?;
@@ -334,12 +959,10 @@ async fn result(
         .map(|e| e.workflow_id.clone())
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| workflow_id.to_string());
-    let status = render::status_name(response.status).to_string();
+    let status = status_to_string(response.status).to_string();
     let (value, error) = match response.outcome {
-        Some(get_workflow_result_response::Outcome::Result(bytes)) => {
-            (render::payload(&bytes), None)
-        }
-        Some(get_workflow_result_response::Outcome::Error(e)) => (serde_json::Value::Null, Some(e)),
+        Some(ResultOutcome::Result(bytes)) => (payload(&bytes), None),
+        Some(ResultOutcome::Error(e)) => (serde_json::Value::Null, Some(e)),
         None => (serde_json::Value::Null, None),
     };
 
@@ -350,40 +973,75 @@ async fn result(
         "result": value,
         "error": error,
     });
-    if !render::structured(args, &summary)? {
-        if args.output == Output::Name {
-            println!("{shown_id}");
-        } else if status == "COMPLETED" {
-            // The result alone, so that it can be piped.
-            println!("{}", serde_json::to_string_pretty(&value)?);
-        }
+    if let Some(out) = render::structured(&global_config.output_format, &summary) {
+        println!("{}", out?);
+    } else if global_config.output_format == "name" {
+        println!("{}", shown_id);
+    } else if status == "COMPLETED" {
+        // The result alone, so that it can be piped.
+        println!("{}", serde_json::to_string_pretty(&value)?);
     }
+
     if status == "COMPLETED" {
         Ok(())
     } else {
-        Err(Error::WorkflowDidNotComplete {
+        let detail = error
+            .filter(|e| !e.is_empty())
+            .map(|e| format!(": {}", e))
+            .unwrap_or_default();
+        Err(CliError::WorkflowFailed {
             workflow_id: shown_id,
-            status,
-            error: error.filter(|e| !e.is_empty()),
+            error_message: format!("ended {}{}", status, detail),
         })
     }
 }
 
-/// Reads input from a file, or from stdin when the path is `-`.
+/// "TASK_COMPLETED" for a journal entry of type `ENTRY_TYPE_TASK_COMPLETED`.
+pub(crate) fn entry_type_name(entry_type: i32) -> String {
+    match orcher_proto::EntryType::try_from(entry_type) {
+        Ok(t) => t
+            .as_str_name()
+            .trim_start_matches("ENTRY_TYPE_")
+            .to_string(),
+        Err(_) => format!("ENTRY_TYPE_{}", entry_type),
+    }
+}
+
+/// Bytes the engine stored as a payload: JSON when they are JSON, otherwise
+/// text, otherwise a note of their size.
+fn payload(bytes: &[u8]) -> serde_json::Value {
+    if bytes.is_empty() {
+        return serde_json::Value::Null;
+    }
+    serde_json::from_slice(bytes).unwrap_or_else(|_| match std::str::from_utf8(bytes) {
+        Ok(text) => serde_json::Value::String(text.to_string()),
+        Err(_) => serde_json::Value::String(format!("<{} bytes of binary data>", bytes.len())),
+    })
+}
+
+/// Check that `text` is JSON and return it as bytes, unchanged.
+fn json_bytes(text: &str, flag: &str) -> Result<Vec<u8>> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .map_err(|e| CliError::invalid_input(format!("{} is not valid JSON: {}", flag, e)))?;
+    Ok(text.as_bytes().to_vec())
+}
+
+/// Read input from a file, or from stdin when the path is `-`.
 fn read_input(path: &std::path::Path) -> Result<String> {
     if path.as_os_str() == "-" {
         let mut text = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
         Ok(text)
     } else {
-        std::fs::read_to_string(path)
-            .map_err(|e| Error::local(format!("cannot read {}: {e}", path.display())))
+        std::fs::read_to_string(path).map_err(|e| {
+            CliError::io_with_path("Failed to read input file", path.display().to_string(), e)
+        })
     }
 }
 
 /// Seconds (`90`), or a duration such as `30s`, `5m` or `1h`.
 fn parse_wait(value: &str) -> std::result::Result<Duration, String> {
-    let invalid = || format!("'{value}' is not a duration such as 90, 30s, 5m or 1h");
+    let invalid = || format!("'{}' is not a duration such as 90, 30s, 5m or 1h", value);
     let split = value
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(value.len());
@@ -398,475 +1056,9 @@ fn parse_wait(value: &str) -> std::result::Result<Duration, String> {
     Ok(Duration::from_secs(seconds))
 }
 
-async fn list(
-    workflow_type: Option<String>,
-    status: Option<String>,
-    query: Option<String>,
-    limit: i32,
-    wide: bool,
-    args: &GlobalArgs,
-) -> Result<()> {
-    let status_filter = match &status {
-        Some(s) => Some(render::parse_status(s).ok_or_else(|| {
-            Error::invalid_input(format!(
-                "unknown status '{s}': use running, completed, failed, canceled, terminated or timed-out"
-            ))
-        })?),
-        None => None,
-    };
-
-    let mut client = Client::connect(args).await?;
-    let (workflows, more) = match &query {
-        Some(q) => {
-            let r = client.search_workflows(q, limit).await?;
-            (r.executions, !r.next_page_token.is_empty())
-        }
-        None => {
-            let r = client
-                .list_workflows(workflow_type.as_deref(), status_filter, limit)
-                .await?;
-            (r.executions, !r.next_page_token.is_empty())
-        }
-    };
-
-    let items: Vec<serde_json::Value> = workflows
-        .iter()
-        .map(|wf| {
-            serde_json::json!({
-                "workflowId": wf.workflow_id,
-                "executionId": wf.execution_id,
-                "type": wf.workflow_type,
-                "taskQueue": wf.task_queue,
-                "status": render::status_name(wf.status),
-                "startedAt": render::rfc3339(wf.start_time.as_ref()),
-                "closedAt": render::rfc3339(wf.close_time.as_ref()),
-            })
-        })
-        .collect();
-    if render::structured(args, &serde_json::Value::Array(items))? {
-        return Ok(());
-    }
-    if args.output == Output::Name {
-        for wf in &workflows {
-            println!("{}", wf.workflow_id);
-        }
-        return Ok(());
-    }
-
-    if workflows.is_empty() {
-        if !args.quiet {
-            println!("No workflows found in namespace '{}'.", client.namespace());
-        }
-        return Ok(());
-    }
-
-    let rows = workflows
-        .iter()
-        .map(|wf| {
-            let (id, started) = if wide {
-                (
-                    render::or_dash(&wf.workflow_id),
-                    render::absolute_time(wf.start_time.as_ref()),
-                )
-            } else {
-                (
-                    truncate(&wf.workflow_id, 36),
-                    render::relative_time(wf.start_time.as_ref()),
-                )
-            };
-            vec![
-                id,
-                render::or_dash(&wf.workflow_type),
-                render::status_cell(wf.status),
-                started,
-            ]
-        })
-        .collect();
-    println!(
-        "{}",
-        render::table(&["WORKFLOW ID", "TYPE", "STATUS", "STARTED"], rows)
-    );
-    if !args.quiet {
-        let mut summary = render::plural(workflows.len(), "workflow", "workflows");
-        if more {
-            summary.push_str(", more with a higher --limit");
-        }
-        println!("{}", style(summary).dim());
-    }
-    Ok(())
-}
-
-/// Shortens a long id for the table, keeping its start.
-fn truncate(id: &str, max: usize) -> String {
-    if id.chars().count() <= max {
-        render::or_dash(id)
-    } else {
-        let head: String = id.chars().take(max - 1).collect();
-        format!("{head}…")
-    }
-}
-
-async fn describe(workflow_id: &str, execution_id: Option<&str>, args: &GlobalArgs) -> Result<()> {
-    let mut client = Client::connect(args).await?;
-    let status = client
-        .get_workflow_status(workflow_id, execution_id)
-        .await?;
-    // Describe by the execution the status names: engines up to at least
-    // 0.5.5 match a bare workflow id against the workflow type instead.
-    let resolved = status
-        .execution
-        .as_ref()
-        .map(|e| e.execution_id.as_str())
-        .filter(|id| !id.is_empty())
-        .or(execution_id);
-    let details = client.describe_workflow(workflow_id, resolved).await?;
-    let info = details.execution_info.as_ref();
-
-    let execution = status.execution.as_ref();
-    let shown_id = execution
-        .map(|e| e.workflow_id.as_str())
-        .filter(|id| !id.is_empty())
-        .unwrap_or(workflow_id);
-
-    let mut obj = serde_json::json!({
-        "workflowId": shown_id,
-        "executionId": execution.map(|e| e.execution_id.as_str()),
-        "type": info.map(|i| i.workflow_type.as_str()),
-        "taskQueue": info.map(|i| i.task_queue.as_str()),
-        "namespace": info.map(|i| i.namespace.as_str()),
-        "status": render::status_name(status.status),
-        "attempt": info.map(|i| i.attempt),
-        "startedAt": render::rfc3339(status.started_at.as_ref()),
-        "completedAt": render::rfc3339(status.completed_at.as_ref()),
-        "pendingTasks": details.pending_tasks,
-        "pendingTimers": details.pending_timers,
-        "pendingEvents": details.pending_events,
-    });
-    match &status.outcome {
-        Some(Outcome::Result(bytes)) => obj["result"] = render::payload(bytes),
-        Some(Outcome::Error(e)) => obj["error"] = serde_json::json!(e),
-        None => {}
-    }
-    if let Some(cron) = info.map(|i| &i.cron_schedule).filter(|c| !c.is_empty()) {
-        obj["cronSchedule"] = serde_json::json!(cron);
-    }
-    if render::structured(args, &obj)? {
-        return Ok(());
-    }
-    if args.output == Output::Name {
-        println!("{shown_id}");
-        return Ok(());
-    }
-
-    let field = |name: &str, value: String| println!("  {:<15}{}", style(name).dim(), value);
-    println!("{}", style(shown_id).bold());
-    if let Some(e) = execution {
-        field("Execution", render::or_dash(&e.execution_id));
-    }
-    field("Status", render::status_cell(status.status));
-    if let Some(i) = info {
-        field("Type", render::or_dash(&i.workflow_type));
-        field("Task queue", render::or_dash(&i.task_queue));
-        field("Namespace", render::or_dash(&i.namespace));
-        field("Attempt", i.attempt.to_string());
-        if !i.cron_schedule.is_empty() {
-            field("Cron", i.cron_schedule.clone());
-        }
-    }
-    field("Started", render::absolute_time(status.started_at.as_ref()));
-    if status.completed_at.is_some() {
-        field(
-            "Completed",
-            render::absolute_time(status.completed_at.as_ref()),
-        );
-    }
-    field(
-        "Pending",
-        format!(
-            "{} tasks, {} timers, {} events",
-            details.pending_tasks, details.pending_timers, details.pending_events
-        ),
-    );
-    match &status.outcome {
-        Some(Outcome::Result(bytes)) => {
-            println!();
-            println!("{}", style("Result").bold());
-            println!("{}", serde_json::to_string_pretty(&render::payload(bytes))?);
-        }
-        Some(Outcome::Error(e)) => {
-            println!();
-            println!("{}", style("Error").red().bold());
-            println!("{e}");
-        }
-        None => {}
-    }
-    Ok(())
-}
-
-async fn cancel(
-    workflow_id: &str,
-    execution_id: Option<&str>,
-    reason: &str,
-    yes: bool,
-    args: &GlobalArgs,
-) -> Result<()> {
-    if !confirm(&format!("Cancel workflow '{workflow_id}'?"), yes)? {
-        return Err(Error::invalid_input("not confirmed; nothing was cancelled"));
-    }
-    let mut client = Client::connect(args).await?;
-    if !client
-        .cancel_workflow(workflow_id, execution_id, reason)
-        .await?
-    {
-        return Err(Error::local(format!(
-            "the engine did not accept the cancellation of '{workflow_id}'"
-        )));
-    }
-    if !args.quiet {
-        println!("Cancellation of '{workflow_id}' requested.");
-    }
-    Ok(())
-}
-
-async fn terminate(
-    workflow_id: &str,
-    execution_id: Option<&str>,
-    reason: &str,
-    yes: bool,
-    args: &GlobalArgs,
-) -> Result<()> {
-    if !confirm(
-        &format!("Terminate workflow '{workflow_id}' now, without cleanup?"),
-        yes,
-    )? {
-        return Err(Error::invalid_input(
-            "not confirmed; nothing was terminated",
-        ));
-    }
-    let mut client = Client::connect(args).await?;
-    if !client
-        .terminate_workflow(workflow_id, execution_id, reason)
-        .await?
-    {
-        return Err(Error::local(format!(
-            "the engine did not terminate '{workflow_id}'"
-        )));
-    }
-    if !args.quiet {
-        println!("Workflow '{workflow_id}' terminated.");
-    }
-    Ok(())
-}
-
-async fn event(
-    workflow_id: &str,
-    event_name: &str,
-    payload: Option<String>,
-    args: &GlobalArgs,
-) -> Result<()> {
-    let payload = match payload {
-        Some(p) => json_bytes(&p, "--payload")?,
-        None => Vec::new(),
-    };
-    let mut client = Client::connect(args).await?;
-    if !client.send_event(workflow_id, event_name, payload).await? {
-        return Err(Error::local(format!(
-            "the engine did not record event '{event_name}' for '{workflow_id}'"
-        )));
-    }
-    if !args.quiet {
-        println!("Event '{event_name}' sent to '{workflow_id}'.");
-    }
-    Ok(())
-}
-
-/// Checks that `text` is JSON and returns it as bytes, unchanged.
-pub fn json_bytes(text: &str, flag: &str) -> Result<Vec<u8>> {
-    serde_json::from_str::<serde_json::Value>(text)
-        .map_err(|e| Error::invalid_input(format!("{flag} is not valid JSON: {e}")))?;
-    Ok(text.as_bytes().to_vec())
-}
-
-/// "TASK_COMPLETED" for `EntryType::TaskCompleted`.
-pub fn entry_type_name(entry_type: i32) -> String {
-    match EntryType::try_from(entry_type) {
-        Ok(t) => t
-            .as_str_name()
-            .trim_start_matches("ENTRY_TYPE_")
-            .to_string(),
-        Err(_) => format!("ENTRY_TYPE_{entry_type}"),
-    }
-}
-
-async fn history(
-    workflow_id: &str,
-    execution_id: Option<&str>,
-    limit: i32,
-    args: &GlobalArgs,
-) -> Result<()> {
-    let mut client = Client::connect(args).await?;
-    let response = client
-        .get_execution_journal(workflow_id, execution_id, limit)
-        .await?;
-    let entries = response.journal;
-
-    let items: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.entry_id,
-                "type": entry_type_name(e.entry_type),
-                "taskId": e.task_id,
-                "timestamp": render::rfc3339(e.timestamp.as_ref()),
-            })
-        })
-        .collect();
-    if render::structured(args, &serde_json::Value::Array(items))? {
-        return Ok(());
-    }
-
-    if entries.is_empty() {
-        if !args.quiet {
-            println!("No journal entries for '{workflow_id}'.");
-        }
-        return Ok(());
-    }
-    let rows = entries
-        .iter()
-        .map(|e| {
-            let name = entry_type_name(e.entry_type);
-            let colored = if name.ends_with("FAILED") || name.ends_with("TIMED_OUT") {
-                style(name).red().to_string()
-            } else if name.ends_with("COMPLETED") {
-                style(name).green().to_string()
-            } else {
-                name
-            };
-            vec![
-                e.entry_id.to_string(),
-                render::absolute_time(e.timestamp.as_ref()),
-                colored,
-                if e.task_id == 0 {
-                    "—".to_string()
-                } else {
-                    e.task_id.to_string()
-                },
-            ]
-        })
-        .collect();
-    println!("{}", render::table(&["ID", "TIME", "ENTRY", "TASK"], rows));
-    if !args.quiet {
-        let mut summary = render::plural(entries.len(), "entry", "entries");
-        if !response.next_page_token.is_empty() {
-            summary.push_str(", more with a higher --limit");
-        }
-        println!("{}", style(summary).dim());
-    }
-    Ok(())
-}
-
-async fn tasks(
-    workflow_id: &str,
-    execution_id: Option<&str>,
-    limit: i32,
-    args: &GlobalArgs,
-) -> Result<()> {
-    let mut client = Client::connect(args).await?;
-    let tasks = client
-        .get_task_executions(workflow_id, execution_id, limit)
-        .await?
-        .tasks;
-
-    let items: Vec<serde_json::Value> = tasks
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "taskId": t.task_id,
-                "type": t.task_type,
-                "status": t.status,
-                "attempt": t.attempt,
-                "startedAt": render::rfc3339(t.started_at.as_ref()),
-                "completedAt": render::rfc3339(t.completed_at.as_ref()),
-                "error": if t.error_message.is_empty() { None } else { Some(&t.error_message) },
-            })
-        })
-        .collect();
-    if render::structured(args, &serde_json::Value::Array(items))? {
-        return Ok(());
-    }
-    if args.output == Output::Name {
-        for t in &tasks {
-            println!("{}", t.task_id);
-        }
-        return Ok(());
-    }
-    if tasks.is_empty() {
-        if !args.quiet {
-            println!("No tasks have run for '{workflow_id}'.");
-        }
-        return Ok(());
-    }
-
-    let rows = tasks
-        .iter()
-        .map(|t| {
-            vec![
-                render::or_dash(&t.task_type),
-                render::status_cell_str(&t.status),
-                t.attempt.to_string(),
-                render::relative_time(t.started_at.as_ref()),
-                duration(t.started_at.as_ref(), t.completed_at.as_ref()),
-            ]
-        })
-        .collect();
-    println!(
-        "{}",
-        render::table(&["TASK", "STATUS", "ATTEMPT", "STARTED", "TOOK"], rows)
-    );
-    for t in tasks.iter().filter(|t| !t.error_message.is_empty()) {
-        println!(
-            "{} {}",
-            style(format!("{}:", render::or_dash(&t.task_type))).red(),
-            t.error_message
-        );
-    }
-    Ok(())
-}
-
-/// "350ms", "4.2s", "3.1m", or a dash for a task that has not finished.
-fn duration(
-    start: Option<&prost_types::Timestamp>,
-    end: Option<&prost_types::Timestamp>,
-) -> String {
-    let (Some(start), Some(end)) = (render::timestamp(start), render::timestamp(end)) else {
-        return "—".to_string();
-    };
-    let ms = end.as_millisecond() - start.as_millisecond();
-    if ms < 1000 {
-        format!("{ms}ms")
-    } else if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        format!("{:.1}m", ms as f64 / 60_000.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn journal_entry_names_drop_the_prefix() {
-        assert_eq!(
-            entry_type_name(EntryType::TaskCompleted as i32),
-            "TASK_COMPLETED"
-        );
-        assert_eq!(
-            entry_type_name(EntryType::WorkflowExecutionStarted as i32),
-            "WORKFLOW_EXECUTION_STARTED"
-        );
-        assert_eq!(entry_type_name(9999), "ENTRY_TYPE_9999");
-    }
 
     #[test]
     fn waits_take_seconds_or_durations() {
@@ -879,30 +1071,50 @@ mod tests {
     }
 
     #[test]
-    fn payloads_must_be_json() {
+    fn journal_entry_names_come_from_the_protocol() {
+        use orcher_proto::EntryType;
         assert_eq!(
-            json_bytes(r#"{"ok":true}"#, "--payload").unwrap(),
+            entry_type_name(EntryType::TaskCompleted as i32),
+            "TASK_COMPLETED"
+        );
+        assert_eq!(
+            entry_type_name(EntryType::WorkflowExecutionCancelRequested as i32),
+            "WORKFLOW_EXECUTION_CANCEL_REQUESTED"
+        );
+        assert_eq!(entry_type_name(9999), "ENTRY_TYPE_9999");
+    }
+
+    #[test]
+    fn inputs_must_be_json() {
+        assert_eq!(
+            json_bytes(r#"{"ok":true}"#, "--input").unwrap(),
             br#"{"ok":true}"#
         );
-        assert!(json_bytes("not json", "--payload").is_err());
+        assert!(json_bytes("not json", "--input").is_err());
     }
 
     #[test]
-    fn task_durations() {
-        let at = |ms: i64| prost_types::Timestamp {
-            seconds: ms / 1000,
-            nanos: ((ms % 1000) * 1_000_000) as i32,
-        };
-        assert_eq!(duration(Some(&at(0)), Some(&at(350))), "350ms");
-        assert_eq!(duration(Some(&at(0)), Some(&at(4200))), "4.2s");
-        assert_eq!(duration(Some(&at(0)), Some(&at(186_000))), "3.1m");
-        assert_eq!(duration(Some(&at(0)), None), "—");
+    fn payloads_render_as_json_text_or_size() {
+        assert_eq!(payload(br#"{"a":1}"#), serde_json::json!({"a": 1}));
+        assert_eq!(payload(b"plain"), serde_json::json!("plain"));
+        assert_eq!(
+            payload(&[0xff, 0xfe]),
+            serde_json::json!("<2 bytes of binary data>")
+        );
+        assert_eq!(payload(b""), serde_json::Value::Null);
     }
 
     #[test]
-    fn long_ids_are_shortened() {
-        assert_eq!(truncate("short", 36), "short");
-        let long = "a".repeat(40);
-        assert_eq!(truncate(&long, 10).chars().count(), 10);
+    fn test_get_grpc_address_default() {
+        let global_config = GlobalConfig::default();
+        let address = get_grpc_address(&global_config).unwrap();
+        assert_eq!(address, "http://localhost:50051");
+    }
+
+    #[test]
+    fn test_get_namespace_default() {
+        let global_config = GlobalConfig::default();
+        let ns = get_namespace(&global_config);
+        assert_eq!(ns, "default");
     }
 }

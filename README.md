@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-<p align="center"><sub>Start, watch and control ORCHER workflows from your terminal.</sub></p>
+<p align="center"><sub>Run ORCHER on your machine, and start, watch and control workflows on any engine, from your terminal.</sub></p>
 
 <br />
 
@@ -17,16 +17,14 @@
 
 <br />
 
-`orcher` runs an ORCHER engine on your machine and talks to any engine over its gRPC API: start workflows, list the ones it is running, look inside one, read its log, and stop it.
+`orcher` works the same against a local engine, a self-hosted one, or ORCHER Cloud.
 
 - <img height="14" src="https://octicons-col.vercel.app/server/38BDF0"> **Local engine**: `orcher dev start` runs the engine and its database in Docker, ready in seconds
-
-- <img height="14" src="https://octicons-col.vercel.app/rocket/38BDF0"> **Start**: start a workflow with JSON input, and wait for its result
-- <img height="14" src="https://octicons-col.vercel.app/list-unordered/38BDF0"> **Workflows**: list, filter and search executions, and see each one's status, result and pending work
-- <img height="14" src="https://octicons-col.vercel.app/history/38BDF0"> **History**: the journal of every step the engine recorded, and the tasks it ran
-- <img height="14" src="https://octicons-col.vercel.app/log/38BDF0"> **Logs**: a workflow's log, followed live until it ends
-- <img height="14" src="https://octicons-col.vercel.app/stop/38BDF0"> **Control**: cancel or terminate a workflow, or send it an event
-- <img height="14" src="https://octicons-col.vercel.app/code/38BDF0"> **Scriptable**: `-o json`, `-o yaml` or `-o name` on every command, and exit codes that mean something
+- <img height="14" src="https://octicons-col.vercel.app/rocket/38BDF0"> **Run**: start a workflow with JSON input or `key=value` parameters, and wait for its result
+- <img height="14" src="https://octicons-col.vercel.app/list-unordered/38BDF0"> **Inspect**: list, filter and search executions; see each one's status, result, journal, tasks and log
+- <img height="14" src="https://octicons-col.vercel.app/stop/38BDF0"> **Control**: cancel or terminate a workflow, send it an event, or act on many at once
+- <img height="14" src="https://octicons-col.vercel.app/globe/38BDF0"> **Cloud**: log in to ORCHER Cloud and keep a context per environment
+- <img height="14" src="https://octicons-col.vercel.app/code/38BDF0"> **Scriptable**: `-o json`, `-o yaml` or `-o name`, and exit codes that mean something
 
 <br />
 
@@ -57,10 +55,9 @@ Run a worker against it (the [quickstart](https://github.com/orcher-io/quickstar
 orcher workflow start order --task-queue quickstart-python --id order-1001 --input '"order-1001"'
 orcher workflow result order-1001          # wait for it, and print what it returned
 orcher workflow list                       # recent workflow executions
-orcher workflow describe order-1001        # one of them in detail
+orcher workflow get order-1001             # one of them in detail
 orcher workflow history order-1001         # every step the engine recorded
 orcher logs order-1001 --follow            # its log, until it ends
-orcher workflow cancel order-1001          # ask it to stop
 ```
 
 <br />
@@ -69,43 +66,48 @@ orcher workflow cancel order-1001          # ask it to stop
 
 | Command | What it does |
 |---------|--------------|
-| `orcher dev start` | Run a local engine in Docker and wait until it is ready |
-| `orcher dev status` | Whether it is running, which version, and on which ports |
-| `orcher dev logs` | The engine's log; `--follow` to keep reading |
-| `orcher dev stop` | Stop it; `--delete-data` also forgets every workflow it ran |
+| `orcher dev start\|stop\|status\|logs` | Run a local engine in Docker: the quick local loop |
+| `orcher server start\|stop\|restart` | The same local engine with more control: an engine config file (`--engine-config`), an existing database (`--database-url`), the log level, a graceful stop |
+| `orcher server status\|version` | Whether an engine (and a gateway, when configured) answers, and which versions are running |
 | `orcher workflow start <type>` | Start a workflow on `--task-queue`, with JSON `--input`; `--wait` for its result |
 | `orcher workflow result <id>` | Wait for a workflow to finish and print its result |
+| `orcher run <type>[@queue] -p key=value` | Start a workflow with parameters and follow it to the end |
 | `orcher workflow list` | List executions; filter with `--type` and `--status`, or `--query` |
-| `orcher workflow describe <id>` | Status, timing, result or error, and pending tasks, timers and events |
+| `orcher workflow get <id>` | Status, timing, and result or error; `--full` adds pending tasks, timers and events |
 | `orcher workflow history <id>` | The journal: every step the engine recorded |
 | `orcher workflow tasks <id>` | The tasks the workflow ran, with attempts and durations |
 | `orcher workflow event <id> <name>` | Send an event, with an optional JSON `--payload` |
-| `orcher workflow cancel <id>` | Ask a workflow to stop; it can clean up first |
-| `orcher workflow terminate <id>` | Stop a workflow at once |
-| `orcher logs <id>` | A workflow's log; `--follow` to keep reading until it ends |
-| `orcher namespace list` | Namespaces, and `create`, `describe`, `update`, `deprecate`, `delete` |
+| `orcher workflow cancel\|terminate <id>` | Ask a workflow to stop, or stop it at once |
+| `orcher logs <id>` | A workflow's log; `--follow` until it ends, `--journal` or `--tasks` for the other views |
+| `orcher status` | A dashboard: where the CLI points, what answers, and workflow counts |
+| `orcher queue list\|stats` | Workflows by task queue |
+| `orcher namespace ...` | `list`, `get`, `create`, `update`, `deprecate`, `delete` |
+| `orcher batch ...` | Cancel, terminate, signal or reset many workflows at once, through a gateway |
+| `orcher auth login\|logout\|status` | Log in to ORCHER Cloud (browser device flow, token, or password) |
+| `orcher config ...` | Contexts: `get-contexts`, `use-context`, `set-context`, `view`, `test-connection` |
+| `orcher new ...` | Scaffold a project |
 | `orcher completion <shell>` | Shell completions for bash, zsh, fish, PowerShell and elvish |
 
 Run `orcher <command> --help` for every flag and more examples.
 
 <br />
 
-### <img height="16" src="https://octicons-col.vercel.app/gear/38BDF0"> Options
-
-Every command takes these, as a flag or from the environment:
+### <img height="16" src="https://octicons-col.vercel.app/gear/38BDF0"> Where commands go
 
 | Flag | Environment | Default | |
 |------|-------------|---------|---|
-| `--server` | `ORCHER_SERVER` | `http://localhost:50051` | The engine's gRPC address; `https://` uses TLS |
+| `--server` | `ORCHER_SERVER` | the context's, else `http://localhost:50051` | The engine's gRPC address; `https://` uses TLS |
+| `--api-url` | `ORCHER_API_URL` | the context's `api`, if any | A gateway's HTTP address: login, batch operations, log streaming |
+| `--context` | `ORCHER_CONTEXT` | the current context | A named environment from the config file |
+| `--config` | `ORCHER_CONFIG` | `~/.orcher/config.yaml` | The config file |
 | `-n`, `--namespace` | `ORCHER_NAMESPACE` | `default` | The namespace to act in |
-| `--api-key` | `ORCHER_API_KEY` | | For an engine that requires an API key |
+| | `ORCHER_API_KEY`, `ORCHER_TOKEN` | the context's stored login | Credentials for an engine that requires them |
+| | `ORCHER_CLOUD_URL` | `https://api.orcher.io` | Where ORCHER Cloud is |
 | `-o`, `--output` | | `table` | `table`, `json`, `yaml` or `name` |
-| `-q`, `--quiet` | | | Print only what was asked for |
-| `--no-color` | `NO_COLOR` | | Plain text |
 
-`orcher dev start` takes `--engine-version` (default `0.5.5`) to run another engine release, and `--grpc-port` and `--http-port` when the defaults, 50051 and 8080, are taken. The engine's ports are bound to `127.0.0.1` only: it runs without authentication, for this machine alone.
+The local engine's ports are bound to `127.0.0.1`: it runs without authentication unless its config file turns it on. `orcher dev start` and `orcher server start` take `--engine-version` (default `0.5.5`) to run another engine release, and other ports when the defaults, 50051 and 8080, are taken.
 
-A command that fails prints the reason to stderr and exits with status 1, and so does `workflow result` for a workflow that failed, was canceled or terminated, or did not finish within `--timeout`. Commands that would stop or delete something ask first; pass `--yes` to skip the question, as you must when there is no terminal to ask on.
+A command that fails prints the reason to stderr and exits with status 1; so do `workflow result` and `run` for a workflow that failed, was canceled or terminated, or did not finish in time. Commands that would stop or delete something ask first; pass `--force` when there is no terminal to ask on.
 
 <br />
 

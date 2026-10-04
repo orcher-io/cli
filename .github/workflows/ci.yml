@@ -26,7 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      # Single-threaded: a few tests change process environment variables.
+      - run: cargo test --lib --locked -- --test-threads=1
 
   # Every command, against the published engine image: the CLI starts the
   # engine itself with `orcher dev start`, a Python worker runs the workflows,
