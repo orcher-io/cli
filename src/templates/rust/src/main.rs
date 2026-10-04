@@ -87,7 +87,9 @@ mod tests {
         let result = run_hello("test").await;
         worker.shutdown();
         let _ = running.await;
-        assert_eq!(result?, "Hello, test!");
+        let result = result?;
+        assert_eq!(result, "Hello, test!");
+        println!("ok: hello returned {result:?}");
         Ok(())
     }
 }

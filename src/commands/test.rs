@@ -231,7 +231,8 @@ fn test_commands(language: Language, project: &Path) -> Vec<Step> {
         }
         Language::Python => vec![step(&python(project), &["-m", "pytest", "-q"], "Running")],
         Language::TypeScript => vec![step("npm", &["test"], "Running")],
-        Language::Rust => vec![step("cargo", &["test"], "Running")],
+        // --nocapture, so that the test's report is seen as with the others
+        Language::Rust => vec![step("cargo", &["test", "--", "--nocapture"], "Running")],
     }
 }
 
@@ -263,7 +264,10 @@ mod tests {
             check_commands(Language::Rust, p)[0].display(),
             "cargo check --all-targets"
         );
-        assert_eq!(test_commands(Language::Rust, p)[0].display(), "cargo test");
+        assert_eq!(
+            test_commands(Language::Rust, p)[0].display(),
+            "cargo test -- --nocapture"
+        );
         assert_eq!(
             check_commands(Language::TypeScript, p)[0].display(),
             "npm run build"

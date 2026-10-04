@@ -17,8 +17,10 @@ async def main() -> int:
     try:
         result = await run_hello("test")
     finally:
+        # Let the worker stop by itself: cancelling its task instead would
+        # interrupt the SDK's native threads.
         await worker.shutdown()
-        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
     if result != "Hello, test!":
         print(f"FAIL: hello returned {result!r}", flush=True)
         return 1
