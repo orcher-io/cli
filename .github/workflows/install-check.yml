@@ -1,0 +1,90 @@
+name: Install check
+
+# Installs a published release the way a user would, through every channel,
+# on clean runners, and runs it. Run it after a release has been published;
+# it checks what is on the registries, not what this checkout builds.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The published version to check, such as 0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, channel: shell }
+          - { os: macos-latest, channel: shell }
+          - { os: windows-latest, channel: powershell }
+          - { os: macos-latest, channel: brew }
+          - { os: ubuntu-latest, channel: brew }
+          - { os: ubuntu-latest, channel: cargo }
+          - { os: ubuntu-latest, channel: pip }
+          - { os: macos-latest, channel: pip }
+          - { os: windows-latest, channel: pip }
+          - { os: ubuntu-latest, channel: uvx }
+          - { os: ubuntu-latest, channel: npm }
+          - { os: macos-latest, channel: npm }
+          - { os: windows-latest, channel: npm }
+          - { os: ubuntu-latest, channel: npx }
+    name: ${{ matrix.channel }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ inputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/setup-python@v5
+        if: matrix.channel == 'pip'
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+        if: matrix.channel == 'uvx'
+      - uses: actions/setup-node@v4
+        if: matrix.channel == 'npm' || matrix.channel == 'npx'
+        with:
+          node-version: 24
+      - uses: Homebrew/actions/setup-homebrew@master
+        if: matrix.channel == 'brew' && runner.os == 'Linux'
+
+      - name: Install and run
+        run: |
+          set -euo pipefail
+          case "${{ matrix.channel }}" in
+            shell)
+              curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/orcher-io/cli/releases/download/v$VERSION/orcher-installer.sh" | sh
+              out=$("$HOME/.cargo/bin/orcher" --version) ;;
+            powershell)
+              powershell -ExecutionPolicy Bypass -c "irm https://github.com/orcher-io/cli/releases/download/v$VERSION/orcher-installer.ps1 | iex"
+              out=$("$USERPROFILE/.cargo/bin/orcher.exe" --version) ;;
+            brew)
+              brew install orcher-io/tap/orcher
+              out=$(orcher --version) ;;
+            cargo)
+              cargo install orcher --version "$VERSION" --locked
+              out=$(orcher --version) ;;
+            pip)
+              python -m pip install "orcher==$VERSION"
+              out=$(orcher --version) ;;
+            uvx)
+              out=$(uvx "orcher@$VERSION" --version) ;;
+            npm)
+              npm install -g "orcher@$VERSION"
+              out=$(orcher --version) ;;
+            npx)
+              out=$(npx --yes "orcher@$VERSION" --version) ;;
+          esac
+          echo "$out"
+          case "$out" in
+            *"$VERSION"*) echo "ok: ${{ matrix.channel }} installed orcher $VERSION" ;;
+            *) echo "::error::expected orcher $VERSION, got: $out"; exit 1 ;;
+          esac
