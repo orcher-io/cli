@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/orcher-io/cli/compare/v0.1.0...v0.1.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* show the README banner on the package registries ([#17](https://github.com/orcher-io/cli/issues/17)) ([d4fe274](https://github.com/orcher-io/cli/commit/d4fe2744b0c5078ccfb30d33d1b0ddc459af62df))
+
 ## 0.1.0 (2026-10-04)
 
 
