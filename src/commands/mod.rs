@@ -1,4 +1,5 @@
 pub mod completion;
+pub mod dev;
 pub mod logs;
 pub mod namespace;
 pub mod workflow;

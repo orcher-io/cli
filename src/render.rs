@@ -75,7 +75,7 @@ pub fn status_cell(status: i32) -> String {
 pub fn status_cell_str(status: &str) -> String {
     let label = label(status);
     match status.to_ascii_uppercase().as_str() {
-        "COMPLETED" | "SUCCEEDED" | "ACTIVE" => {
+        "COMPLETED" | "SUCCEEDED" | "ACTIVE" | "READY" => {
             format!("{} {}", style("●").green(), style(label).green())
         }
         "RUNNING" | "PENDING" | "SCHEDULED" | "STARTED" => {

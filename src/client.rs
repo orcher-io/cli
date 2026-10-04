@@ -441,5 +441,6 @@ mod tests {
         let err = Client::connect(&args).await.err().expect("connect fails");
         let text = err.to_string();
         assert!(text.contains("http://127.0.0.1:1"), "{text}");
+        assert!(text.contains("orcher dev start"), "{text}");
     }
 }
