@@ -27,3 +27,24 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+
+  # Every command, against the published engine image: the CLI starts the
+  # engine itself with `orcher dev start`, a Python worker runs the workflows,
+  # and tests/e2e/run.sh checks each command's exit status and output.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install the worker's SDK
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -r tests/e2e/requirements.txt
+      - name: Run every command against the engine
+        run: tests/e2e/run.sh target/debug/orcher "$RUNNER_TEMP/venv/bin/python"
