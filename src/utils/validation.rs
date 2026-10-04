@@ -490,8 +490,8 @@ fn validate_task_spec(
     errors: &mut Vec<ValidationError>,
     path_prefix: &str,
 ) {
-    // Task spec validation depends on the runtime type
-    // For now, just check that it's an object
+    // What a spec must contain depends on its runtime; only its shape is
+    // checked here.
     if !spec.is_object() {
         errors.push(ValidationError {
             path: path_prefix.to_string(),

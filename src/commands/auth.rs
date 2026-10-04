@@ -604,7 +604,7 @@ async fn fetch_user_info_from_api(context: &Context, token: &str) -> Result<Stri
             Ok("Unknown user".to_string())
         }
         Err(_) => {
-            // API call failed, return placeholder
+            // The gateway did not answer; the user stays unnamed
             Ok("Unknown user".to_string())
         }
     }

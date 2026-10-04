@@ -207,7 +207,7 @@ pub async fn execute(
                 .await
             }
             ServerType::Http => {
-                // HTTP fallback only supports text logs for now
+                // Through a gateway only the text log is available
                 if log_type != LogType::Text {
                     return Err(CliError::invalid_input(
                         "HTTP mode only supports text logs. Use gRPC for --journal or --tasks.",
