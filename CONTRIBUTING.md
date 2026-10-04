@@ -10,7 +10,7 @@ You need a stable Rust toolchain.
 
 ```bash
 cargo build
-cargo test                  # unit tests, as CI runs them
+cargo test --lib -- --test-threads=1   # unit tests, as CI runs them
 cargo fmt --all --check     # CI fails on unformatted code
 cargo clippy --all-targets -- -D warnings
 ```

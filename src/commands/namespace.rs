@@ -1,207 +1,259 @@
-//! `orcher namespace`: the namespaces workflows run in.
+//! `orcher namespace` — create, get, list, update, deprecate, and delete namespaces.
 
-use crate::client::Client;
-use crate::commands::confirm;
-use crate::error::{Error, Result};
+use crate::error::{CliError, Result};
 use crate::render;
-use crate::settings::{GlobalArgs, Output};
+use crate::time::Timestamptz;
+use crate::utils::GlobalConfig;
 use clap::{Args, Subcommand};
 use console::style;
-use orcher_proto::{CreateNamespaceRequest, NamespaceInfo, UpdateNamespaceRequest};
-use std::collections::HashMap;
+use tracing::info;
 
+/// Namespace management command
 #[derive(Args)]
 pub struct NamespaceCommand {
     #[command(subcommand)]
-    action: Action,
+    pub action: NamespaceCommands,
 }
 
 #[derive(Subcommand)]
-enum Action {
-    /// List namespaces
-    #[command(alias = "ls")]
+pub enum NamespaceCommands {
+    /// Create a new namespace
+    Create {
+        /// Namespace name (alphanumeric, hyphens, underscores, 1-100 chars)
+        name: String,
+
+        /// Human-readable description
+        #[arg(short = 'd', long = "description", default_value = "")]
+        description: String,
+
+        /// Retention period for completed workflow data (in days)
+        #[arg(short = 'r', long = "retention-days", default_value = "7")]
+        retention_days: i32,
+
+        /// Owner email address
+        #[arg(short = 'e', long = "owner-email", default_value = "")]
+        owner_email: String,
+
+        /// Key-value data pairs (key=value)
+        #[arg(long = "data")]
+        data: Vec<String>,
+    },
+
+    /// Get detailed information about a namespace
+    #[command(aliases = ["describe", "info"])]
+    Get {
+        /// Namespace name
+        name: String,
+    },
+
+    /// List all namespaces
+    #[command(aliases = ["ls"])]
     List {
-        /// How many to show
-        #[arg(short, long, default_value_t = 100)]
+        /// Maximum number of results
+        #[arg(short = 'l', long = "limit", default_value = "100")]
         limit: i32,
 
-        /// How many to skip
-        #[arg(long, default_value_t = 0)]
+        /// Offset for pagination
+        #[arg(long = "offset", default_value = "0")]
         offset: i32,
     },
 
-    /// Show a namespace
-    #[command(alias = "get")]
-    Describe { name: String },
-
-    /// Create a namespace
-    Create {
-        /// Letters, digits, hyphens and underscores; up to 100 characters
-        name: String,
-
-        /// What the namespace is for
-        #[arg(short, long, default_value = "")]
-        description: String,
-
-        /// How many days to keep finished workflows
-        #[arg(short, long, default_value_t = 7)]
-        retention_days: i32,
-
-        /// Who to contact about it
-        #[arg(long, default_value = "")]
-        owner_email: String,
-
-        /// Extra data, as key=value; repeatable
-        #[arg(long = "data", value_name = "KEY=VALUE")]
-        data: Vec<String>,
-    },
-
-    /// Change a namespace's details
+    /// Update namespace metadata
     Update {
+        /// Namespace name to update
         name: String,
 
-        #[arg(short, long)]
+        /// Updated description
+        #[arg(short = 'd', long = "description")]
         description: Option<String>,
 
-        #[arg(short, long)]
-        retention_days: Option<i32>,
-
-        #[arg(long)]
+        /// Updated owner email
+        #[arg(short = 'e', long = "owner-email")]
         owner_email: Option<String>,
 
-        /// Extra data, as key=value; repeatable. Replaces all existing data.
-        #[arg(long = "data", value_name = "KEY=VALUE")]
+        /// Updated retention period (in days)
+        #[arg(short = 'r', long = "retention-days")]
+        retention_days: Option<i32>,
+
+        /// Updated key-value data pairs (key=value, replaces all existing data)
+        #[arg(long = "data")]
         data: Vec<String>,
     },
 
-    /// Stop new workflows from starting in a namespace
+    /// Deprecate a namespace (no new workflows allowed)
     Deprecate {
+        /// Namespace name to deprecate
         name: String,
 
-        /// Do not ask for confirmation
-        #[arg(short = 'y', long)]
-        yes: bool,
+        /// Skip confirmation prompt
+        #[arg(short = 'f', long = "force")]
+        force: bool,
     },
 
-    /// Delete a namespace
+    /// Delete a namespace (soft delete)
     Delete {
+        /// Namespace name to delete
         name: String,
 
-        /// Do not ask for confirmation
-        #[arg(short = 'y', long)]
-        yes: bool,
+        /// Skip confirmation prompt
+        #[arg(short = 'f', long = "force")]
+        force: bool,
     },
 }
 
-pub async fn run(cmd: NamespaceCommand, args: &GlobalArgs) -> Result<()> {
+/// Execute namespace management command
+pub async fn execute(cmd: NamespaceCommand, global_config: &GlobalConfig) -> Result<()> {
     match cmd.action {
-        Action::List { limit, offset } => list(limit, offset, args).await,
-        Action::Describe { name } => {
-            let ns = Client::connect(args).await?.get_namespace(&name).await?;
-            show(&ns, args)
-        }
-        Action::Create {
+        NamespaceCommands::Create {
             name,
             description,
             retention_days,
             owner_email,
             data,
         } => {
-            let request = CreateNamespaceRequest {
+            create_namespace(
                 name,
                 description,
-                retention_period_days: retention_days,
+                retention_days,
                 owner_email,
-                data: key_values(data)?,
-            };
-            let ns = Client::connect(args)
-                .await?
-                .create_namespace(request)
-                .await?;
-            show(&ns, args)
+                data,
+                global_config,
+            )
+            .await
         }
-        Action::Update {
+        NamespaceCommands::Get { name } => get_namespace(name, global_config).await,
+        NamespaceCommands::List { limit, offset } => {
+            list_namespaces(limit, offset, global_config).await
+        }
+        NamespaceCommands::Update {
             name,
             description,
-            retention_days,
             owner_email,
+            retention_days,
             data,
         } => {
-            // The engine leaves a field unchanged when it is empty or zero.
-            let request = UpdateNamespaceRequest {
+            update_namespace(
                 name,
-                description: description.unwrap_or_default(),
-                owner_email: owner_email.unwrap_or_default(),
-                retention_period_days: retention_days.unwrap_or(0),
-                data: key_values(data)?,
-            };
-            let ns = Client::connect(args)
-                .await?
-                .update_namespace(request)
-                .await?;
-            show(&ns, args)
+                description,
+                owner_email,
+                retention_days,
+                data,
+                global_config,
+            )
+            .await
         }
-        Action::Deprecate { name, yes } => {
-            if !confirm(
-                &format!("Deprecate namespace '{name}'? No new workflows can start in it."),
-                yes,
-            )? {
-                return Err(Error::invalid_input("not confirmed; nothing was changed"));
-            }
-            let ns = Client::connect(args)
-                .await?
-                .deprecate_namespace(&name)
-                .await?;
-            show(&ns, args)
+        NamespaceCommands::Deprecate { name, force } => {
+            deprecate_namespace(name, force, global_config).await
         }
-        Action::Delete { name, yes } => {
-            if !confirm(&format!("Delete namespace '{name}'?"), yes)? {
-                return Err(Error::invalid_input("not confirmed; nothing was deleted"));
-            }
-            Client::connect(args).await?.delete_namespace(&name).await?;
-            if !args.quiet {
-                println!("Namespace '{name}' deleted.");
-            }
-            Ok(())
+        NamespaceCommands::Delete { name, force } => {
+            delete_namespace(name, force, global_config).await
         }
     }
 }
 
-async fn list(limit: i32, offset: i32, args: &GlobalArgs) -> Result<()> {
-    let (namespaces, total) = Client::connect(args)
-        .await?
-        .list_namespaces(limit, offset)
+/// Create a new namespace
+async fn create_namespace(
+    name: String,
+    description: String,
+    retention_days: i32,
+    owner_email: String,
+    data: Vec<String>,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!("Creating namespace: {}", name);
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let data_map = crate::utils::parse_key_value_pairs(data)?;
+
+    let ns = client
+        .create_namespace(&name, &description, retention_days, &owner_email, data_map)
         .await?;
 
-    let items = namespaces.iter().map(to_json).collect();
-    if render::structured(args, &serde_json::Value::Array(items))? {
+    if global_config.is_structured_output() {
+        print_namespace_structured(&ns, &global_config.output_format);
+    } else {
+        println!(
+            "{} Namespace {} created successfully",
+            style("Created").green().bold(),
+            style(&ns.name).cyan().bold()
+        );
+        println!();
+        print_namespace_detail(&ns);
+    }
+
+    Ok(())
+}
+
+/// Get namespace details
+async fn get_namespace(name: String, global_config: &GlobalConfig) -> Result<()> {
+    info!("Getting namespace: {}", name);
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let ns = client.get_namespace(&name).await?;
+
+    if global_config.is_structured_output() {
+        print_namespace_structured(&ns, &global_config.output_format);
+    } else {
+        print_namespace_detail(&ns);
+    }
+
+    Ok(())
+}
+
+/// List namespaces
+async fn list_namespaces(limit: i32, offset: i32, global_config: &GlobalConfig) -> Result<()> {
+    info!("Listing namespaces");
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let (namespaces, total_count) = client.list_namespaces(limit, offset).await?;
+
+    if namespaces.is_empty() {
+        println!("{}", style("No namespaces found").yellow());
         return Ok(());
     }
-    if args.output == Output::Name {
+
+    if global_config.is_structured_output() {
+        let ns_list: Vec<serde_json::Value> = namespaces.iter().map(namespace_to_json).collect();
+        match global_config.output_format.as_str() {
+            "json" => println!(
+                "{}",
+                serde_json::to_string_pretty(&ns_list).unwrap_or_default()
+            ),
+            "yaml" => println!("{}", serde_yaml::to_string(&ns_list).unwrap_or_default()),
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if global_config.quiet {
         for ns in &namespaces {
             println!("{}", ns.name);
         }
         return Ok(());
     }
-    if namespaces.is_empty() {
-        if !args.quiet {
-            println!("No namespaces found.");
-        }
-        return Ok(());
-    }
 
-    let rows = namespaces
+    let rows: Vec<Vec<String>> = namespaces
         .iter()
         .map(|ns| {
+            let description = if ns.description.chars().count() > 40 {
+                format!("{}…", ns.description.chars().take(39).collect::<String>())
+            } else {
+                render::or_dash(&ns.description)
+            };
             vec![
-                ns.name.clone(),
+                render::or_dash(&ns.name),
                 render::status_cell_str(&ns.status),
                 format!("{}d", ns.retention_period_days),
-                render::or_dash(&ellipsize(&ns.description, 40)),
-                render::relative_time(ns.created_at.as_ref()),
+                description,
+                render::relative_time(ns.created_at.as_ref().map(|t| t.seconds)),
             ]
         })
         .collect();
+
+    println!();
     println!(
         "{}",
         render::table(
@@ -209,92 +261,237 @@ async fn list(limit: i32, offset: i32, args: &GlobalArgs) -> Result<()> {
             rows
         )
     );
-    if !args.quiet {
-        let summary = format!("{} of {total}", namespaces.len());
-        println!("{}", style(summary).dim());
-    }
+    println!();
+    println!(
+        "  {}",
+        style(format!(
+            "{} of {} namespace{}",
+            namespaces.len(),
+            total_count,
+            if total_count == 1 { "" } else { "s" }
+        ))
+        .dim()
+    );
+
     Ok(())
 }
 
-fn show(ns: &NamespaceInfo, args: &GlobalArgs) -> Result<()> {
-    if render::structured(args, &to_json(ns))? {
-        return Ok(());
+/// Update namespace metadata
+async fn update_namespace(
+    name: String,
+    description: Option<String>,
+    owner_email: Option<String>,
+    retention_days: Option<i32>,
+    data: Vec<String>,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!("Updating namespace: {}", name);
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let data_map = crate::utils::parse_key_value_pairs(data)?;
+
+    // Empty string means "no change" in the proto contract
+    let ns = client
+        .update_namespace(
+            &name,
+            description.as_deref().unwrap_or(""),
+            owner_email.as_deref().unwrap_or(""),
+            retention_days.unwrap_or(0),
+            data_map,
+        )
+        .await?;
+
+    if global_config.is_structured_output() {
+        print_namespace_structured(&ns, &global_config.output_format);
+    } else {
+        println!(
+            "{} Namespace {} updated successfully",
+            style("Updated").green().bold(),
+            style(&ns.name).cyan().bold()
+        );
+        println!();
+        print_namespace_detail(&ns);
     }
-    if args.output == Output::Name {
-        println!("{}", ns.name);
-        return Ok(());
+
+    Ok(())
+}
+
+/// Deprecate a namespace
+async fn deprecate_namespace(
+    name: String,
+    force: bool,
+    global_config: &GlobalConfig,
+) -> Result<()> {
+    info!("Deprecating namespace: {}", name);
+
+    if !force {
+        let confirmed = crate::commands::common::confirm_action(
+            &format!(
+                "Deprecate namespace '{}'? No new workflows will be allowed.",
+                name
+            ),
+            false,
+        )?;
+        if !confirmed {
+            println!("{}", style("Cancelled").yellow());
+            return Ok(());
+        }
     }
-    let field = |name: &str, value: String| println!("  {:<15}{}", style(name).dim(), value);
-    println!("{}", style(&ns.name).bold());
-    field("Status", render::status_cell_str(&ns.status));
-    field("Retention", format!("{} days", ns.retention_period_days));
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    let ns = client.deprecate_namespace(&name).await?;
+
+    if global_config.is_structured_output() {
+        print_namespace_structured(&ns, &global_config.output_format);
+    } else {
+        println!(
+            "{} Namespace {} has been deprecated",
+            style("Deprecated").yellow().bold(),
+            style(&ns.name).cyan().bold()
+        );
+        println!("No new workflows can be started in this namespace.");
+    }
+
+    Ok(())
+}
+
+/// Delete a namespace
+async fn delete_namespace(name: String, force: bool, global_config: &GlobalConfig) -> Result<()> {
+    info!("Deleting namespace: {}", name);
+
+    if name == "default" && !force {
+        return Err(CliError::invalid_input(
+            "Cannot delete the 'default' namespace. Use --force to override.",
+        ));
+    }
+
+    if !force {
+        let confirmed = crate::commands::common::confirm_action(
+            &format!(
+                "Delete namespace '{}'? This is a soft-delete and can be reversed by an admin.",
+                name
+            ),
+            false,
+        )?;
+        if !confirmed {
+            println!("{}", style("Cancelled").yellow());
+            return Ok(());
+        }
+    }
+
+    let mut client = crate::client::connection::connect_grpc(global_config).await?;
+
+    client.delete_namespace(&name).await?;
+
+    if !global_config.quiet {
+        println!(
+            "{} Namespace {} has been deleted",
+            style("Deleted").red().bold(),
+            style(&name).cyan().bold()
+        );
+    }
+
+    Ok(())
+}
+
+// =========================================================================
+// Output Helpers
+// =========================================================================
+
+fn print_namespace_detail(ns: &orcher_proto::NamespaceInfo) {
+    println!("{}", style("Namespace Details").bold());
+    println!("{}", style("-".repeat(50)).dim());
+    println!("  Name:            {}", style(&ns.name).cyan().bold());
+
+    let status_display = match ns.status.as_str() {
+        "active" => "ACTIVE".to_string(),
+        "deprecated" => "DEPRECATED".to_string(),
+        "deleted" => "DELETED".to_string(),
+        other => other.to_uppercase(),
+    };
+    let status_styled = match ns.status.as_str() {
+        "active" => style(status_display).green().bold(),
+        "deprecated" => style(status_display).yellow().bold(),
+        "deleted" => style(status_display).red().bold(),
+        _ => style(status_display).white().bold(),
+    };
+    println!("  Status:          {}", status_styled);
+
     if !ns.description.is_empty() {
-        field("Description", ns.description.clone());
+        println!("  Description:     {}", ns.description);
     }
+
     if !ns.owner_email.is_empty() {
-        field("Owner", ns.owner_email.clone());
+        println!("  Owner:           {}", ns.owner_email);
     }
-    field("Created", render::absolute_time(ns.created_at.as_ref()));
-    field("Updated", render::absolute_time(ns.updated_at.as_ref()));
-    let mut data: Vec<_> = ns.data.iter().collect();
-    data.sort();
-    for (key, value) in data {
-        field(key, value.clone());
+
+    println!("  Retention:       {} days", ns.retention_period_days);
+
+    if let Some(created) = &ns.created_at {
+        let dt = Timestamptz::from_second(created.seconds)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!("  Created:         {}", dt);
     }
-    Ok(())
+
+    if let Some(updated) = &ns.updated_at {
+        let dt = Timestamptz::from_second(updated.seconds)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!("  Updated:         {}", dt);
+    }
+
+    if !ns.data.is_empty() {
+        println!("  Data:");
+        for (key, value) in &ns.data {
+            println!("    {}: {}", style(key).dim(), value);
+        }
+    }
 }
 
-fn to_json(ns: &NamespaceInfo) -> serde_json::Value {
+fn print_namespace_structured(ns: &orcher_proto::NamespaceInfo, format: &str) {
+    let json_val = namespace_to_json(ns);
+    match format {
+        "json" => println!(
+            "{}",
+            serde_json::to_string_pretty(&json_val).unwrap_or_default()
+        ),
+        "yaml" => println!("{}", serde_yaml::to_string(&json_val).unwrap_or_default()),
+        _ => {}
+    }
+}
+
+fn namespace_to_json(ns: &orcher_proto::NamespaceInfo) -> serde_json::Value {
+    let created = ns
+        .created_at
+        .as_ref()
+        .map(|t| {
+            Timestamptz::from_second(t.seconds)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+
+    let updated = ns
+        .updated_at
+        .as_ref()
+        .map(|t| {
+            Timestamptz::from_second(t.seconds)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+
     serde_json::json!({
         "name": ns.name,
         "status": ns.status,
         "description": ns.description,
-        "ownerEmail": ns.owner_email,
-        "retentionDays": ns.retention_period_days,
+        "owner_email": ns.owner_email,
+        "retention_period_days": ns.retention_period_days,
         "data": ns.data,
-        "createdAt": render::rfc3339(ns.created_at.as_ref()),
-        "updatedAt": render::rfc3339(ns.updated_at.as_ref()),
+        "created_at": created,
+        "updated_at": updated,
     })
-}
-
-fn ellipsize(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        let head: String = text.chars().take(max - 1).collect();
-        format!("{head}…")
-    }
-}
-
-/// Parses repeated `key=value` arguments.
-fn key_values(pairs: Vec<String>) -> Result<HashMap<String, String>> {
-    pairs
-        .into_iter()
-        .map(|pair| match pair.split_once('=') {
-            Some((key, value)) if !key.is_empty() => Ok((key.to_string(), value.to_string())),
-            _ => Err(Error::invalid_input(format!(
-                "'{pair}' is not in the form key=value"
-            ))),
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn key_values_parse() {
-        let parsed = key_values(vec!["team=payments".into(), "url=a=b".into()]).unwrap();
-        assert_eq!(parsed["team"], "payments");
-        assert_eq!(parsed["url"], "a=b", "only the first = separates");
-        assert!(key_values(vec!["novalue".into()]).is_err());
-        assert!(key_values(vec!["=x".into()]).is_err());
-    }
-
-    #[test]
-    fn long_descriptions_are_shortened() {
-        assert_eq!(ellipsize("short", 40), "short");
-        assert_eq!(ellipsize(&"x".repeat(50), 10).chars().count(), 10);
-    }
 }
