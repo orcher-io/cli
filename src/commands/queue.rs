@@ -1,13 +1,18 @@
 //! `orcher queue` — task queue visibility (list, stats).
-//! Uses QueryService.
+//!
+//! The engine has no task-queue filter: ListWorkflows ignores one, and a
+//! search for `TaskQueue = '…'` matches a label of that name instead. So these
+//! commands page through ListWorkflows, filtering by type on the engine where
+//! asked, and pick the task queue out here.
 
-use crate::client::grpc_client::DEFAULT_GRPC_PORT;
+use crate::client::grpc_client::{OrcherGrpcClient, DEFAULT_GRPC_PORT};
 use crate::config::Config;
 use crate::error::Result;
 use crate::render;
 use crate::utils::GlobalConfig;
 use clap::{Args, Subcommand};
 use console::style;
+use orcher_proto::WorkflowExecutionInfo;
 use tracing::info;
 
 /// Queue management command
@@ -85,6 +90,55 @@ fn get_namespace(global_config: &GlobalConfig) -> String {
         .unwrap_or_else(|| "default".to_string())
 }
 
+/// The most executions read while looking for a queue's workflows.
+const MAX_SCANNED: usize = 10_000;
+const PAGE_SIZE: i32 = 500;
+
+/// A queue's workflows, newest first, up to `limit` (all when `None`), and
+/// whether every execution was looked at.
+async fn workflows_in_queue(
+    client: &mut OrcherGrpcClient,
+    queue: Option<&str>,
+    workflow_type: Option<&str>,
+    limit: Option<usize>,
+) -> Result<(Vec<WorkflowExecutionInfo>, bool)> {
+    let mut found = Vec::new();
+    let mut scanned = 0;
+    let mut page_token: Option<Vec<u8>> = None;
+    loop {
+        let page = client
+            .list_workflows(workflow_type, None, PAGE_SIZE, page_token.take())
+            .await?;
+        scanned += page.executions.len();
+        found.extend(in_queue(page.executions, queue));
+        if limit.is_some_and(|l| found.len() >= l) {
+            found.truncate(limit.unwrap_or(usize::MAX));
+            return Ok((found, false));
+        }
+        if page.next_page_token.is_empty() {
+            return Ok((found, true));
+        }
+        if scanned >= MAX_SCANNED {
+            return Ok((found, false));
+        }
+        page_token = Some(page.next_page_token);
+    }
+}
+
+/// The executions on `queue`, or all of them when no queue is named.
+fn in_queue(
+    executions: Vec<WorkflowExecutionInfo>,
+    queue: Option<&str>,
+) -> Vec<WorkflowExecutionInfo> {
+    match queue {
+        Some(q) => executions
+            .into_iter()
+            .filter(|e| e.task_queue == q)
+            .collect(),
+        None => executions,
+    }
+}
+
 /// List workflows filtered by task queue
 async fn list_by_queue(
     queue_name: Option<String>,
@@ -96,32 +150,13 @@ async fn list_by_queue(
 
     let mut client = crate::client::connection::connect_grpc(global_config).await?;
 
-    // Build query for task queue filter
-    let query = if let Some(ref queue) = queue_name {
-        format!("TaskQueue = '{}'", queue)
-    } else {
-        String::new()
-    };
-
-    let workflows = if query.is_empty() {
-        client
-            .list_workflows(None, None, limit, None)
-            .await?
-            .executions
-    } else {
-        client
-            .search_workflows(&query, limit, None)
-            .await?
-            .executions
-    };
-
-    if workflows.is_empty() {
-        println!("{}", style("No workflows found").yellow());
-        if let Some(q) = &queue_name {
-            println!("  Task queue: {}", q);
-        }
-        return Ok(());
-    }
+    let (workflows, _) = workflows_in_queue(
+        &mut client,
+        queue_name.as_deref(),
+        None,
+        Some(limit.max(1) as usize),
+    )
+    .await?;
 
     // Structured output (-o json/yaml) for scripting.
     let items = serde_json::Value::Array(
@@ -140,6 +175,14 @@ async fn list_by_queue(
     );
     if let Some(out) = render::structured(&global_config.output_format, &items) {
         println!("{}", out?);
+        return Ok(());
+    }
+
+    if workflows.is_empty() {
+        println!("{}", style("No workflows found").yellow());
+        if let Some(q) = &queue_name {
+            println!("  Task queue: {}", q);
+        }
         return Ok(());
     }
 
@@ -203,19 +246,32 @@ async fn show_queue_stats(
 
     let mut client = crate::client::connection::connect_grpc(global_config).await?;
 
-    // Build query for task queue
-    let mut query_parts = vec![format!("TaskQueue = '{}'", queue_name)];
-    if let Some(wf_type) = &workflow_type {
-        query_parts.push(format!("WorkflowType = '{}'", wf_type));
+    let (workflows, complete) = workflows_in_queue(
+        &mut client,
+        Some(&queue_name),
+        workflow_type.as_deref(),
+        None,
+    )
+    .await?;
+    let count = workflows.len();
+
+    // Structured output (-o json/yaml) for scripting.
+    let counts = count_by_status(&workflows);
+    let value = serde_json::json!({
+        "queue": queue_name,
+        "namespace": get_namespace(global_config),
+        "workflowType": workflow_type,
+        "total": count,
+        "running": counts.running,
+        "completed": counts.completed,
+        "failed": counts.failed,
+        "other": counts.other,
+        "complete": complete,
+    });
+    if let Some(out) = render::structured(&global_config.output_format, &value) {
+        println!("{}", out?);
+        return Ok(());
     }
-    let query = query_parts.join(" AND ");
-
-    // Get workflow count
-    let count = client.count_workflows(&query).await?;
-
-    // Get some recent workflows to compute stats
-    let response = client.search_workflows(&query, 100, None).await?;
-    let workflows = &response.executions;
 
     println!();
     println!(
@@ -230,23 +286,20 @@ async fn show_queue_stats(
     println!("  Namespace:      {}", get_namespace(global_config));
     println!();
 
-    // Count by status
-    let mut running = 0;
-    let mut completed = 0;
-    let mut failed = 0;
-    let mut other = 0;
-
-    for wf in workflows {
-        match crate::client::grpc_client::status_to_string(wf.status) {
-            "RUNNING" => running += 1,
-            "COMPLETED" => completed += 1,
-            "FAILED" => failed += 1,
-            _ => other += 1,
-        }
-    }
+    let StatusCounts {
+        running,
+        completed,
+        failed,
+        other,
+    } = counts;
 
     println!("{}", style("Summary").bold());
-    println!("  Total Workflows:  {}", count);
+    let total = if complete {
+        count.to_string()
+    } else {
+        format!("{} (of the latest {} executions)", count, MAX_SCANNED)
+    };
+    println!("  Total Workflows:  {}", total);
     println!("  Running:          {}", style(running).cyan());
     println!("  Completed:        {}", style(completed).green());
     println!("  Failed:           {}", style(failed).red());
@@ -266,18 +319,82 @@ async fn show_queue_stats(
     println!();
     println!("{}", style("Commands").dim());
     println!(
-        "  {} workflow list --query \"TaskQueue = '{}'\"",
+        "  {} queue list --queue {}",
         style("orcher").cyan(),
         queue_name
     );
-    println!("  {} queue pollers {}", style("orcher").cyan(), queue_name);
 
     Ok(())
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct StatusCounts {
+    running: usize,
+    completed: usize,
+    failed: usize,
+    other: usize,
+}
+
+fn count_by_status(workflows: &[WorkflowExecutionInfo]) -> StatusCounts {
+    let mut counts = StatusCounts::default();
+    for wf in workflows {
+        match crate::client::grpc_client::status_to_string(wf.status) {
+            "RUNNING" => counts.running += 1,
+            "COMPLETED" => counts.completed += 1,
+            "FAILED" => counts.failed += 1,
+            _ => counts.other += 1,
+        }
+    }
+    counts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn execution(id: &str, queue: &str, status: i32) -> WorkflowExecutionInfo {
+        WorkflowExecutionInfo {
+            workflow_id: id.to_string(),
+            task_queue: queue.to_string(),
+            status,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_the_named_queue_is_kept() {
+        let all = vec![
+            execution("a", "orders", 1),
+            execution("b", "emails", 2),
+            execution("c", "orders", 3),
+        ];
+        let ids: Vec<_> = in_queue(all.clone(), Some("orders"))
+            .into_iter()
+            .map(|e| e.workflow_id)
+            .collect();
+        assert_eq!(ids, ["a", "c"]);
+        assert_eq!(in_queue(all, None).len(), 3);
+    }
+
+    #[test]
+    fn statuses_are_counted() {
+        let counts = count_by_status(&[
+            execution("a", "q", 1),
+            execution("b", "q", 2),
+            execution("c", "q", 2),
+            execution("d", "q", 3),
+            execution("e", "q", 4),
+        ]);
+        assert_eq!(
+            counts,
+            StatusCounts {
+                running: 1,
+                completed: 2,
+                failed: 1,
+                other: 1
+            }
+        );
+    }
 
     #[test]
     fn test_get_grpc_address_default() {

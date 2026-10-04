@@ -190,6 +190,15 @@ check "logs by bare id" 0 "out:execution started" -- logs hello-1
 check "logs --journal" 0 "out:Task completed" -- logs hello-1 --journal
 check "logs --tasks" 0 'jq:.[0].type == "greet"' -- logs hello-1 --tasks -o json
 check "logs --follow of a finished workflow returns" 0 "out:execution started" -- logs hello-1 --follow
+check "start a workflow on a queue nobody polls" 0 - -- workflow start hello --task-queue cli-e2e-idle --id idle-1 --input '"nobody"'
+check "queue list keeps to its queue" 0 'jq:length == 7 and all(.[]; .taskQueue == "cli-e2e") and all(.[]; .workflowId != "idle-1")' -- queue list --queue cli-e2e --limit 100 -o json
+check "queue list of the idle queue" 0 'jq:length == 1 and .[0].workflowId == "idle-1"' -- queue list --queue cli-e2e-idle -o json
+check "queue list of an unknown queue" 0 'jq:length == 0' -- queue list --queue no-such-queue -o json
+check "queue list across queues" 0 "out:cli-e2e-idle" -- queue list
+check "queue stats counts by status" 0 'jq:.total == 7 and .completed == 5 and .failed == 2 and .complete' -- queue stats cli-e2e -o json
+check "queue stats by type" 0 'jq:.total >= 1 and .failed == .total' -- queue stats cli-e2e --type broken -o json
+check "queue stats of the idle queue" 0 'jq:.total == 1 and .completed == 0' -- queue stats cli-e2e-idle -o json
+check "queue stats as a table" 0 "out:Queue Statistics: cli-e2e" -- queue stats cli-e2e
 check "status dashboard" 0 "out:Orchestrator (gRPC):  ● Connected" -- status
 check "status of workflow types" 0 'jq:any(.[]; .type == "hello" and .executions >= 4)' -- status workflows -o json
 
