@@ -228,7 +228,7 @@ async fn list_namespaces(limit: i32, offset: i32, global_config: &GlobalConfig) 
         return Ok(());
     }
 
-    if global_config.quiet {
+    if global_config.quiet || global_config.output_format == "name" {
         for ns in &namespaces {
             println!("{}", ns.name);
         }

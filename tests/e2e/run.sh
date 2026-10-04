@@ -304,6 +304,38 @@ check "workflows survived stop and start" 0 'jq:.status == "COMPLETED"' -- workf
 check "stop and delete the data" 0 "out:data deleted" -- dev stop --delete-data
 if docker volume inspect orcher-dev-postgres >/dev/null 2>&1; then STATUS=0; : >"$WORK/out"; : >"$WORK/err"; fail "the data volume is gone"; else pass "the data volume is gone"; fi
 
+echo "== an engine that requires an API key"
+KEY=orch_e2e_secret
+check "start the engine with authentication on" 0 - -- server start -q --grpc-port "$GRPC_PORT" --http-port "$HTTP_PORT" --engine-config "$HERE/auth-engine.toml"
+if docker exec orcher-dev-postgres psql -U orcher -d orcher -v ON_ERROR_STOP=1 -q -c "
+    INSERT INTO users (email, password_hash) VALUES ('cli-e2e@example.com', 'not-a-login');
+    INSERT INTO api_keys (user_id, name, key_prefix, key_hash)
+    SELECT id, 'cli-e2e', 'orch_e2e', encode(sha256('$KEY'::bytea), 'hex')
+    FROM users WHERE email = 'cli-e2e@example.com';" >"$WORK/out" 2>"$WORK/err"; then
+  pass "seed an API key"
+else
+  STATUS=$?; fail "seed an API key"
+fi
+check "without a key the engine refuses" 1 "err:Missing authorization header" -- workflow list
+ORCHER_API_KEY=wrong "$ORCHER" workflow list >"$WORK/out" 2>"$WORK/err" </dev/null; STATUS=$?
+if [ "$STATUS" -eq 1 ] && grep -q "invalid API key" "$WORK/err"; then pass "a wrong ORCHER_API_KEY is refused"; else fail "a wrong ORCHER_API_KEY is refused"; fi
+export ORCHER_API_KEY=$KEY
+check "with ORCHER_API_KEY: list namespaces" 0 "out:default" -- namespace list -o name
+"$PYTHON" "$HERE/worker.py" >"$WORK/worker-auth.log" 2>&1 &
+WORKER_PID=$!
+check "with ORCHER_API_KEY: a worker and a workflow run" 0 'jq:.greeting == "hello, Key"' -- workflow start hello --task-queue cli-e2e --id auth-1 --input '"Key"' --wait --timeout 60s
+check "with ORCHER_API_KEY: get" 0 'jq:.status == "COMPLETED"' -- workflow get auth-1 -o json
+check "with ORCHER_API_KEY: history" 0 "out:WORKFLOW_EXECUTION_COMPLETED" -- workflow history auth-1
+check "with ORCHER_API_KEY: logs --follow" 0 "out:execution started" -- logs auth-1 --follow
+check "with ORCHER_API_KEY: run" 0 'out:"times": 3' -- run greet_params@cli-e2e -p name=Key -p times=3
+check "with ORCHER_API_KEY: queue stats" 0 'jq:.total == 2' -- queue stats cli-e2e -o json
+check "with ORCHER_API_KEY: status" 0 "out:Connected" -- status
+unset ORCHER_API_KEY
+ORCHER_TOKEN=$KEY "$ORCHER" workflow get auth-1 -o json >"$WORK/out" 2>"$WORK/err" </dev/null; STATUS=$?
+if [ "$STATUS" -eq 0 ] && jq -e '.status == "COMPLETED"' "$WORK/out" >/dev/null; then pass "ORCHER_TOKEN is sent the same way"; else fail "ORCHER_TOKEN is sent the same way"; fi
+kill "$WORKER_PID" 2>/dev/null; WORKER_PID=
+check "stop the authenticated engine" 0 - -- server stop --delete-data
+
 echo
 echo "$PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

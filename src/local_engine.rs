@@ -29,8 +29,13 @@ const LABEL: &str = "io.orcher.dev=true";
 pub const ENGINE_GRPC_PORT: u16 = 50051;
 pub const ENGINE_HTTP_PORT: u16 = 8080;
 
-/// Where a config file given with `--config` is mounted in the container.
-const CONFIG_MOUNT: &str = "/etc/orcher/orchestrator.toml";
+/// Where a config file given with `--engine-config` is copied in the
+/// container. It is copied rather than mounted, so that it works whatever the
+/// Docker host can see of this machine's files.
+const CONFIG_PATH: &str = "/tmp/orcher-engine.toml";
+
+/// The label recording which file the config came from, for a restart.
+const CONFIG_LABEL: &str = "io.orcher.engine-config";
 
 /// Local-only credentials: Postgres is reachable from the engine alone.
 const LOCAL_DATABASE_URL: &str = "postgresql://orcher:orcher@orcher-dev-postgres:5432/orcher";
@@ -114,9 +119,19 @@ pub async fn start(opts: &EngineOptions, quiet: bool) -> Result<()> {
     }
 
     say(format!("Starting {}…", opts.image));
-    let run_args = engine_run_args(opts)?;
-    let run_args: Vec<&str> = run_args.iter().map(String::as_str).collect();
-    if let Err(e) = docker(&run_args) {
+    let create_args = engine_create_args(opts)?;
+    let create_args: Vec<&str> = create_args.iter().map(String::as_str).collect();
+    let started = docker(&create_args)
+        .and_then(|_| match &opts.config_file {
+            Some(file) => {
+                let source = absolute(file)?;
+                let source = source.to_string_lossy();
+                docker(&["cp", &source, &format!("{ENGINE}:{CONFIG_PATH}")])
+            }
+            None => Ok(String::new()),
+        })
+        .and_then(|_| docker(&["start", ENGINE]));
+    if let Err(e) = started {
         // `docker run` leaves a created container behind when it cannot start
         // it; remove it so that the next start begins clean.
         let _ = docker(&["rm", "-f", ENGINE]);
@@ -135,7 +150,18 @@ pub async fn start(opts: &EngineOptions, quiet: bool) -> Result<()> {
 
 async fn wait_healthy_or_explain(timeout: Duration) -> Result<()> {
     if let Err(err) = wait_healthy(ENGINE, timeout).await {
-        let tail = docker(&["logs", "--tail", "30", ENGINE]).unwrap_or_default();
+        // The engine reports why it stopped on stderr, so read both streams.
+        let tail = Command::new("docker")
+            .args(["logs", "--tail", "30", ENGINE])
+            .output()
+            .map(|o| {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+            })
+            .unwrap_or_default();
         return Err(CliError::local_engine(format!(
             "{err}\n  The engine's last log lines:\n{tail}\n  More with `orcher dev logs`."
         )));
@@ -238,13 +264,9 @@ fn options_from_inspect(value: &serde_json::Value) -> EngineOptions {
         .filter(|h| !h.is_empty())
         .unwrap_or("127.0.0.1")
         .to_string();
-    let config_file = value["Mounts"].as_array().and_then(|mounts| {
-        mounts
-            .iter()
-            .find(|m| m["Destination"] == CONFIG_MOUNT)
-            .and_then(|m| m["Source"].as_str())
-            .map(PathBuf::from)
-    });
+    let config_file = value["Config"]["Labels"][CONFIG_LABEL]
+        .as_str()
+        .map(PathBuf::from);
     EngineOptions {
         image: container.image,
         grpc_port: container.grpc_port.unwrap_or(ENGINE_GRPC_PORT),
@@ -317,11 +339,10 @@ pub fn print_started(opts: &EngineOptions) {
     );
 }
 
-/// The `docker run` arguments for the engine container.
-fn engine_run_args(opts: &EngineOptions) -> Result<Vec<String>> {
+/// The `docker create` arguments for the engine container.
+fn engine_create_args(opts: &EngineOptions) -> Result<Vec<String>> {
     let mut a: Vec<String> = [
-        "run",
-        "--detach",
+        "create",
         "--name",
         ENGINE,
         "--label",
@@ -353,9 +374,9 @@ fn engine_run_args(opts: &EngineOptions) -> Result<Vec<String>> {
     ];
     if let Some(file) = &opts.config_file {
         let file = absolute(file)?;
-        a.push("--volume".into());
-        a.push(format!("{}:{CONFIG_MOUNT}:ro", file.display()));
-        env.push(format!("ORCHER_ORCHESTRATOR_CONFIG={CONFIG_MOUNT}"));
+        a.push("--label".into());
+        a.push(format!("{CONFIG_LABEL}={}", file.display()));
+        env.push(format!("ORCHER_ORCHESTRATOR_CONFIG={CONFIG_PATH}"));
     }
     for e in env {
         a.push("--env".into());
@@ -649,7 +670,7 @@ mod tests {
 
     #[test]
     fn the_engine_is_published_on_the_bind_host_only() {
-        let args = engine_run_args(&options()).unwrap();
+        let args = engine_create_args(&options()).unwrap();
         let joined = args.join(" ");
         assert!(
             joined.contains("--publish 127.0.0.1:50061:50051"),
@@ -667,15 +688,15 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut opts = options();
         opts.config_file = Some(file.path().to_path_buf());
-        let joined = engine_run_args(&opts).unwrap().join(" ");
-        assert!(joined.contains(&format!("{CONFIG_MOUNT}:ro")), "{joined}");
+        let joined = engine_create_args(&opts).unwrap().join(" ");
+        assert!(joined.contains(CONFIG_LABEL), "{joined}");
         assert!(
-            joined.contains(&format!("ORCHER_ORCHESTRATOR_CONFIG={CONFIG_MOUNT}")),
+            joined.contains(&format!("ORCHER_ORCHESTRATOR_CONFIG={CONFIG_PATH}")),
             "{joined}"
         );
 
         opts.config_file = Some(PathBuf::from("/no/such/file.toml"));
-        assert!(engine_run_args(&opts).is_err());
+        assert!(engine_create_args(&opts).is_err());
     }
 
     #[test]
@@ -690,7 +711,7 @@ mod tests {
         );
         let mut opts = options();
         opts.database_url = Some("postgresql://u:p@127.0.0.1:5432/orcher".to_string());
-        let joined = engine_run_args(&opts).unwrap().join(" ");
+        let joined = engine_create_args(&opts).unwrap().join(" ");
         assert!(
             joined.contains("host.docker.internal:host-gateway"),
             "{joined}"
@@ -730,12 +751,12 @@ mod tests {
         let value = serde_json::json!({
             "State": {"Status": "running", "Running": true},
             "Config": {"Image": "ghcr.io/orcher-io/orcher:0.5.4",
-                       "Env": ["LOG_LEVEL=debug", format!("DATABASE_URL={LOCAL_DATABASE_URL}")]},
+                       "Env": ["LOG_LEVEL=debug", format!("DATABASE_URL={LOCAL_DATABASE_URL}")],
+                       "Labels": {CONFIG_LABEL: "/home/me/auth.toml"}},
             "HostConfig": {"PortBindings": {
                 "50051/tcp": [{"HostIp": "0.0.0.0", "HostPort": "50061"}],
                 "8080/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8081"}]
-            }},
-            "Mounts": [{"Source": "/home/me/auth.toml", "Destination": CONFIG_MOUNT}]
+            }}
         });
         let opts = options_from_inspect(&value);
         assert_eq!(opts.image, "ghcr.io/orcher-io/orcher:0.5.4");

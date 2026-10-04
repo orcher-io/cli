@@ -1,0 +1,28 @@
+# An engine config with API-key authentication on, for the e2e run that
+# checks the CLI against an engine that requires a key. The engine's bind
+# addresses and database come from the environment `orcher server start` sets;
+# the sections below are the ones the config file must have.
+
+[server]
+grpc_addr = "0.0.0.0:50051"
+http_addr = "0.0.0.0:8080"
+max_concurrent_streams = 1000
+
+[orchestrator]
+max_workers = 100
+max_concurrent_tasks = 1000
+heartbeat_timeout_secs = 90
+
+[storage]
+database_url = "set from DATABASE_URL"
+
+[logging]
+level = "info"
+format = "compact"
+
+[health]
+readiness_enabled = true
+liveness_enabled = true
+
+[security]
+auth_mode = "api-key"
