@@ -8,11 +8,16 @@ use crate::settings::{GlobalArgs, Output};
 use clap::{Args, Subcommand};
 use console::style;
 use orcher_proto::get_workflow_status_response::Outcome;
-use orcher_proto::EntryType;
+use orcher_proto::{get_workflow_result_response, EntryType, StartWorkflowRequest};
+use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Args)]
 #[command(after_help = "\
 Examples:
+  orcher workflow start order --task-queue orders --input '{\"id\": 1001}'
+  orcher workflow start order --id order-1001 --wait   Start it and print its result
+  orcher workflow result order-1001             Wait for a workflow's result
   orcher workflow list                          Recent executions
   orcher workflow list --status running         Only the running ones
   orcher workflow describe order-1001           Status, outcome and pending work
@@ -25,6 +30,49 @@ pub struct WorkflowCommand {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Start a workflow
+    Start {
+        /// The workflow type, as the worker registered it
+        workflow_type: String,
+
+        /// The task queue its worker polls
+        #[arg(long, default_value = "default")]
+        task_queue: String,
+
+        /// The workflow id; the engine makes one up when it is omitted
+        #[arg(long = "id")]
+        workflow_id: Option<String>,
+
+        /// The workflow's input, as JSON
+        #[arg(short, long)]
+        input: Option<String>,
+
+        /// Read the input JSON from a file, or from stdin with -
+        #[arg(long, conflicts_with = "input")]
+        input_file: Option<PathBuf>,
+
+        /// Wait for the workflow to finish and print its result
+        #[arg(short, long)]
+        wait: bool,
+
+        /// With --wait, how long to wait: seconds, or a duration such as 5m
+        #[arg(long, default_value = "5m", value_parser = parse_wait, requires = "wait")]
+        timeout: Duration,
+    },
+
+    /// Wait for a workflow to finish and print its result
+    Result {
+        workflow_id: String,
+
+        /// A specific run, rather than the latest
+        #[arg(short, long)]
+        execution_id: Option<String>,
+
+        /// How long to wait: seconds, or a duration such as 5m
+        #[arg(long, default_value = "60s", value_parser = parse_wait)]
+        timeout: Duration,
+    },
+
     /// List workflow executions
     #[command(alias = "ls")]
     List {
@@ -136,6 +184,44 @@ enum Action {
 
 pub async fn run(cmd: WorkflowCommand, args: &GlobalArgs) -> Result<()> {
     match cmd.action {
+        Action::Start {
+            workflow_type,
+            task_queue,
+            workflow_id,
+            input,
+            input_file,
+            wait,
+            timeout,
+        } => {
+            let input = match (input, input_file) {
+                (Some(text), _) => json_bytes(&text, "--input")?,
+                (None, Some(path)) => json_bytes(&read_input(&path)?, "--input-file")?,
+                (None, None) => Vec::new(),
+            };
+            let request = StartWorkflowRequest {
+                workflow_type,
+                task_queue,
+                workflow_id: workflow_id.unwrap_or_default(),
+                input,
+                ..Default::default()
+            };
+            start(request, wait.then_some(timeout), args).await
+        }
+        Action::Result {
+            workflow_id,
+            execution_id,
+            timeout,
+        } => {
+            let mut client = Client::connect(args).await?;
+            result(
+                &mut client,
+                &workflow_id,
+                execution_id.as_deref(),
+                timeout,
+                args,
+            )
+            .await
+        }
         Action::List {
             workflow_type,
             status,
@@ -175,6 +261,141 @@ pub async fn run(cmd: WorkflowCommand, args: &GlobalArgs) -> Result<()> {
             limit,
         } => tasks(&workflow_id, execution_id.as_deref(), limit, args).await,
     }
+}
+
+async fn start(
+    request: StartWorkflowRequest,
+    wait: Option<Duration>,
+    args: &GlobalArgs,
+) -> Result<()> {
+    let mut client = Client::connect(args).await?;
+    let started = client.start_workflow(request).await?;
+
+    if let Some(timeout) = wait {
+        if !args.quiet && !args.is_structured() {
+            eprintln!(
+                "Started {} (execution {}); waiting for it to finish…",
+                started.workflow_id, started.execution_id
+            );
+        }
+        return result(
+            &mut client,
+            &started.workflow_id,
+            Some(&started.execution_id),
+            timeout,
+            args,
+        )
+        .await;
+    }
+
+    let value = serde_json::json!({
+        "workflowId": started.workflow_id,
+        "executionId": started.execution_id,
+        "startedAt": render::rfc3339(started.started_at.as_ref()),
+    });
+    if render::structured(args, &value)? {
+        return Ok(());
+    }
+    if args.output == Output::Name || args.quiet {
+        println!("{}", started.workflow_id);
+        return Ok(());
+    }
+    println!(
+        "Started {} (execution {}).",
+        style(&started.workflow_id).bold(),
+        started.execution_id
+    );
+    println!(
+        "{}",
+        style(format!(
+            "Wait for its result with `orcher workflow result {}`.",
+            started.workflow_id
+        ))
+        .dim()
+    );
+    Ok(())
+}
+
+/// Waits for a workflow and prints its result. A workflow that did not
+/// complete is an error, so that the exit status says how it ended.
+async fn result(
+    client: &mut Client,
+    workflow_id: &str,
+    execution_id: Option<&str>,
+    timeout: Duration,
+    args: &GlobalArgs,
+) -> Result<()> {
+    let response = client
+        .get_workflow_result(workflow_id, execution_id, timeout)
+        .await?;
+    let shown_id = response
+        .execution
+        .as_ref()
+        .map(|e| e.workflow_id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| workflow_id.to_string());
+    let status = render::status_name(response.status).to_string();
+    let (value, error) = match response.outcome {
+        Some(get_workflow_result_response::Outcome::Result(bytes)) => {
+            (render::payload(&bytes), None)
+        }
+        Some(get_workflow_result_response::Outcome::Error(e)) => (serde_json::Value::Null, Some(e)),
+        None => (serde_json::Value::Null, None),
+    };
+
+    let summary = serde_json::json!({
+        "workflowId": shown_id,
+        "executionId": response.execution.as_ref().map(|e| e.execution_id.as_str()),
+        "status": status,
+        "result": value,
+        "error": error,
+    });
+    if !render::structured(args, &summary)? {
+        if args.output == Output::Name {
+            println!("{shown_id}");
+        } else if status == "COMPLETED" {
+            // The result alone, so that it can be piped.
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        }
+    }
+    if status == "COMPLETED" {
+        Ok(())
+    } else {
+        Err(Error::WorkflowDidNotComplete {
+            workflow_id: shown_id,
+            status,
+            error: error.filter(|e| !e.is_empty()),
+        })
+    }
+}
+
+/// Reads input from a file, or from stdin when the path is `-`.
+fn read_input(path: &std::path::Path) -> Result<String> {
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+        Ok(text)
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| Error::local(format!("cannot read {}: {e}", path.display())))
+    }
+}
+
+/// Seconds (`90`), or a duration such as `30s`, `5m` or `1h`.
+fn parse_wait(value: &str) -> std::result::Result<Duration, String> {
+    let invalid = || format!("'{value}' is not a duration such as 90, 30s, 5m or 1h");
+    let split = value
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (number, unit) = value.split_at(split);
+    let number: u64 = number.parse().map_err(|_| invalid())?;
+    let seconds = match unit {
+        "" | "s" => number,
+        "m" => number * 60,
+        "h" => number * 3600,
+        _ => return Err(invalid()),
+    };
+    Ok(Duration::from_secs(seconds))
 }
 
 async fn list(
@@ -290,7 +511,15 @@ async fn describe(workflow_id: &str, execution_id: Option<&str>, args: &GlobalAr
     let status = client
         .get_workflow_status(workflow_id, execution_id)
         .await?;
-    let details = client.describe_workflow(workflow_id, execution_id).await?;
+    // Describe by the execution the status names: engines up to at least
+    // 0.5.5 match a bare workflow id against the workflow type instead.
+    let resolved = status
+        .execution
+        .as_ref()
+        .map(|e| e.execution_id.as_str())
+        .filter(|id| !id.is_empty())
+        .or(execution_id);
+    let details = client.describe_workflow(workflow_id, resolved).await?;
     let info = details.execution_info.as_ref();
 
     let execution = status.execution.as_ref();
@@ -637,6 +866,16 @@ mod tests {
             "WORKFLOW_EXECUTION_STARTED"
         );
         assert_eq!(entry_type_name(9999), "ENTRY_TYPE_9999");
+    }
+
+    #[test]
+    fn waits_take_seconds_or_durations() {
+        assert_eq!(parse_wait("90"), Ok(Duration::from_secs(90)));
+        assert_eq!(parse_wait("30s"), Ok(Duration::from_secs(30)));
+        assert_eq!(parse_wait("5m"), Ok(Duration::from_secs(300)));
+        assert_eq!(parse_wait("1h"), Ok(Duration::from_secs(3600)));
+        assert!(parse_wait("5x").is_err());
+        assert!(parse_wait("m").is_err());
     }
 
     #[test]

@@ -9,10 +9,11 @@ use orcher_proto::{
     DeleteNamespaceRequest, DeprecateNamespaceRequest, DescribeWorkflowExecutionRequest,
     DescribeWorkflowExecutionResponse, GetExecutionJournalRequest, GetExecutionJournalResponse,
     GetExecutionLogsRequest, GetExecutionLogsResponse, GetNamespaceRequest,
-    GetTaskExecutionsRequest, GetTaskExecutionsResponse, GetWorkflowStatusRequest,
-    GetWorkflowStatusResponse, ListNamespacesRequest, ListWorkflowsRequest, ListWorkflowsResponse,
-    NamespaceInfo, SearchWorkflowsRequest, SearchWorkflowsResponse, SendEventRequest,
-    TerminateWorkflowRequest, UpdateNamespaceRequest,
+    GetTaskExecutionsRequest, GetTaskExecutionsResponse, GetWorkflowResultRequest,
+    GetWorkflowResultResponse, GetWorkflowStatusRequest, GetWorkflowStatusResponse,
+    ListNamespacesRequest, ListWorkflowsRequest, ListWorkflowsResponse, NamespaceInfo,
+    SearchWorkflowsRequest, SearchWorkflowsResponse, SendEventRequest, StartWorkflowRequest,
+    StartWorkflowResponse, TerminateWorkflowRequest, UpdateNamespaceRequest,
 };
 use std::time::Duration;
 use tonic::metadata::MetadataValue;
@@ -109,6 +110,53 @@ impl Client {
     }
 
     // Workflows
+
+    pub async fn start_workflow(
+        &mut self,
+        request: StartWorkflowRequest,
+    ) -> Result<StartWorkflowResponse> {
+        let request = StartWorkflowRequest {
+            namespace: self.namespace.clone(),
+            ..request
+        };
+        self.workflows
+            .start_workflow(req(request))
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|s| Error::api("WorkflowService.StartWorkflow", s))
+    }
+
+    /// Waits up to `wait` for the workflow to finish and returns its outcome.
+    pub async fn get_workflow_result(
+        &mut self,
+        workflow_id: &str,
+        execution_id: Option<&str>,
+        wait: Duration,
+    ) -> Result<GetWorkflowResultResponse> {
+        let request = GetWorkflowResultRequest {
+            workflow_id: workflow_id.to_string(),
+            execution_id: execution_id.unwrap_or_default().to_string(),
+            namespace: self.namespace.clone(),
+            timeout: Some(prost_types::Duration {
+                seconds: wait.as_secs() as i64,
+                nanos: 0,
+            }),
+        };
+        // The engine answers by the wait it was given; allow it time to.
+        let mut request = tonic::Request::new(request);
+        request.set_timeout(wait + CALL_TIMEOUT);
+        self.workflows
+            .get_workflow_result(request)
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|s| match s.code() {
+                tonic::Code::DeadlineExceeded => Error::local(format!(
+                    "workflow '{workflow_id}' did not finish within {}s; wait longer with --timeout",
+                    wait.as_secs()
+                )),
+                _ => Error::api("WorkflowService.GetWorkflowResult", s),
+            })
+    }
 
     pub async fn get_workflow_status(
         &mut self,

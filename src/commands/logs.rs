@@ -84,6 +84,7 @@ pub async fn run(cmd: LogsCommand, args: &GlobalArgs) -> Result<()> {
             break;
         }
     }
+    lines.sort_by_key(|l| l.id);
     let mut last_id = lines.iter().map(|l| l.id).max().unwrap_or(0);
     let skip = if cmd.tail == 0 {
         0
@@ -112,11 +113,13 @@ pub async fn run(cmd: LogsCommand, args: &GlobalArgs) -> Result<()> {
                 ..base.clone()
             })
             .await?;
-        for line in &response.logs {
+        let mut new = response.logs;
+        new.sort_by_key(|l| l.id);
+        for line in &new {
             print_line(line, structured, args)?;
             last_id = last_id.max(line.id);
         }
-        if ended && response.logs.is_empty() {
+        if ended && new.is_empty() {
             return Ok(());
         }
         tokio::time::sleep(FOLLOW_INTERVAL).await;
