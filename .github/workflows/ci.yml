@@ -56,3 +56,17 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install --quiet -r tests/e2e/requirements.txt
       - name: Run every command against the engine
         run: tests/e2e/run.sh target/debug/orcher "$RUNNER_TEMP/venv/bin/python"
+
+  # The release builds for Windows too; this keeps it compiling and its tests
+  # passing there.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --lib --locked -- --test-threads=1
+      - run: cargo run --locked -- --version
