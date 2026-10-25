@@ -125,7 +125,7 @@ Run `orcher <command> --help` for every flag and more examples.
 | | `ORCHER_CREDENTIAL_STORE` | the OS keychain | `file` keeps logins in `credentials` beside the config file (owner-only), as happens anyway where there is no keychain |
 | `-o`, `--output` | | `table` | `table`, `json`, `yaml` or `name` |
 
-The local engine's ports are bound to `127.0.0.1`: it runs without authentication unless its config file turns it on. `orcher dev start` and `orcher server start` take `--engine-version` (default `0.5.5`) to run another engine release, and other ports when the defaults, 50051 and 8080, are taken.
+The local engine's ports are bound to `127.0.0.1`: it runs without authentication unless its config file turns it on. Published anywhere else (`--host 0.0.0.0`), a current engine refuses to start without authentication, so turn it on in the file given with `--config`. `orcher dev start` and `orcher server start` take `--engine-version` (default `0.5.5`) to run another engine release, and other ports when the defaults, 50051 and 8080, are taken.
 
 A command that fails prints the reason to stderr and exits with status 1; so do `workflow result` and `run` for a workflow that failed, was canceled or terminated, or did not finish in time. Commands that would stop or delete something ask first; pass `--force` when there is no terminal to ask on.
 
