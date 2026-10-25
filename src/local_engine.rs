@@ -340,6 +340,16 @@ pub fn print_started(opts: &EngineOptions) {
 }
 
 /// The `docker create` arguments for the engine container.
+/// Whether `host` is this machine's loopback, which only processes on it can
+/// reach.
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 fn engine_create_args(opts: &EngineOptions) -> Result<Vec<String>> {
     let mut a: Vec<String> = [
         "create",
@@ -372,6 +382,14 @@ fn engine_create_args(opts: &EngineOptions) -> Result<Vec<String>> {
         format!("LOG_LEVEL={}", opts.log_level),
         "LOG_FORMAT=compact".to_string(),
     ];
+    // The engine listens on every interface inside its container and cannot
+    // see how its ports are published, so with authentication off it refuses
+    // to start unless told an open API is intended. Published on this
+    // machine's loopback only, it is; anywhere else it is not, and the engine
+    // refuses unless a config file turns authentication on.
+    if is_loopback_host(&opts.bind_host) {
+        env.push("ORCHER_INSECURE=true".to_string());
+    }
     if let Some(file) = &opts.config_file {
         let file = absolute(file)?;
         a.push("--label".into());
@@ -681,6 +699,27 @@ mod tests {
         assert!(joined.contains(LOCAL_DATABASE_URL), "{joined}");
         assert!(!joined.contains("ORCHER_ORCHESTRATOR_CONFIG"), "{joined}");
         assert_eq!(args.last().map(String::as_str), Some("img:1"));
+    }
+
+    /// Published on loopback only, the engine may serve without
+    /// authentication; published anywhere else it is not told it may, so it
+    /// refuses unless its config file turns authentication on.
+    #[test]
+    fn an_open_api_is_allowed_only_when_published_on_loopback() {
+        let mut opts = options();
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            opts.bind_host = host.to_string();
+            let joined = engine_create_args(&opts).unwrap().join(" ");
+            assert!(
+                joined.contains("--env ORCHER_INSECURE=true"),
+                "{host}: {joined}"
+            );
+        }
+        for host in ["0.0.0.0", "192.168.1.20", "::"] {
+            opts.bind_host = host.to_string();
+            let joined = engine_create_args(&opts).unwrap().join(" ");
+            assert!(!joined.contains("ORCHER_INSECURE"), "{host}: {joined}");
+        }
     }
 
     #[test]
