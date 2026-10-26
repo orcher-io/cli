@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/orcher-io/cli/compare/v0.1.1...v0.1.2) (2026-10-26)
+
+
+### Features
+
+* let the local engine run without authentication when it is published on loopback ([#19](https://github.com/orcher-io/cli/issues/19)) ([1b0a549](https://github.com/orcher-io/cli/commit/1b0a549e64885fd41643061e460b03308bc40bbf))
+* manage the engine's API keys with orcher api-key ([#21](https://github.com/orcher-io/cli/issues/21)) ([56df437](https://github.com/orcher-io/cli/commit/56df43784ae6f76d0270c89a603e5562b428f429))
+
 ## [0.1.1](https://github.com/orcher-io/cli/compare/v0.1.0...v0.1.1) (2026-10-04)
 
 
