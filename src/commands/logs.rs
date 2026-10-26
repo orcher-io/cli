@@ -1127,6 +1127,7 @@ mod tests {
             quiet: true,
             ..Default::default()
         };
+        let _env = crate::client::CREDENTIAL_ENV.lock().await;
         std::env::set_var("ORCHER_TOKEN", "token-1");
         let result = tokio::time::timeout(
             Duration::from_secs(10),

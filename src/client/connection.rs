@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 /// Default addresses for ORCHER services
 pub const DEFAULT_GRPC_ADDR: &str = "http://localhost:50051";
-pub const DEFAULT_HTTP_ADDR: &str = "http://localhost:8000";
+pub const DEFAULT_HTTP_ADDR: &str = "http://localhost:8080";
 
 /// Health endpoint paths. These differ by service: the gateway nests its REST
 /// routes under `/api/v1`, while the orchestrator serves a root `/health`.
@@ -482,11 +482,12 @@ fn normalize_server_url(url: &str) -> String {
     }
 }
 
-/// Derive the gateway address from the gRPC address, when none is configured.
+/// Derive the REST API's address from the gRPC address, when none is
+/// configured.
 ///
 /// An `https://` address without a port is a cloud deployment, which serves
-/// the gateway from the same origin. Otherwise the gateway is assumed to
-/// listen on port 8000 of the same host, as a self-hosted one does.
+/// the REST API from the same origin. Otherwise it is the engine's HTTP port,
+/// 8080, on the same host, where the engine serves its REST API.
 fn derive_http_addr(grpc_addr: &str) -> String {
     // If it's the default gRPC address, use default HTTP address
     if grpc_addr == DEFAULT_GRPC_ADDR || grpc_addr == "localhost:50051" {
@@ -504,7 +505,7 @@ fn derive_http_addr(grpc_addr: &str) -> String {
             if scheme == "https" && url.port().is_none() {
                 return format!("https://{}", host);
             }
-            return format!("{}://{}:8000", scheme, host);
+            return format!("{}://{}:8080", scheme, host);
         }
     }
 
@@ -542,11 +543,11 @@ mod tests {
         assert_eq!(derive_http_addr("localhost:50051"), DEFAULT_HTTP_ADDR);
         assert_eq!(
             derive_http_addr("http://myhost:50051"),
-            "http://myhost:8000"
+            "http://myhost:8080"
         );
         assert_eq!(
             derive_http_addr("http://192.168.1.1:50051"),
-            "http://192.168.1.1:8000"
+            "http://192.168.1.1:8080"
         );
         assert_eq!(
             derive_http_addr(crate::constants::DEFAULT_CLOUD_URL),
@@ -583,7 +584,7 @@ mod tests {
         let manager = ConnectionManager::from_config(&config);
 
         assert_eq!(manager.grpc_addr(), "https://api.orcher.io:50051");
-        assert_eq!(manager.http_addr(), "https://api.orcher.io:8000");
+        assert_eq!(manager.http_addr(), "https://api.orcher.io:8080");
     }
 
     #[tokio::test]
@@ -592,7 +593,7 @@ mod tests {
             server: Some("http://engine.internal:50051".to_string()),
             ..Default::default()
         });
-        assert_eq!(derived.http_addr(), "http://engine.internal:8000");
+        assert_eq!(derived.http_addr(), "http://engine.internal:8080");
 
         let configured = ConnectionManager::from_config(&GlobalConfig {
             server: Some("http://engine.internal:50051".to_string()),
@@ -618,7 +619,7 @@ mod tests {
         );
         assert_eq!(
             derive_http_addr("https://engine.example:50051"),
-            "https://engine.example:8000"
+            "https://engine.example:8080"
         );
     }
 

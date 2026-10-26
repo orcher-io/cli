@@ -176,6 +176,11 @@ where
     }))
 }
 
+/// Held by tests that set the credential environment variables, which are
+/// process-wide: two such tests running at once would read each other's.
+#[cfg(test)]
+pub(crate) static CREDENTIAL_ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

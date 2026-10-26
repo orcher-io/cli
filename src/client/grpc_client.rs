@@ -1093,8 +1093,7 @@ mod tests {
     #[test]
     fn credentials_come_from_the_token_then_the_api_key() {
         let context = Some("credential-order-test-context-without-a-stored-login");
-        // The library tests run single-threaded (--test-threads=1) because
-        // several of them change the process environment.
+        let _env = super::super::CREDENTIAL_ENV.blocking_lock();
         {
             std::env::remove_var("ORCHER_TOKEN");
             std::env::set_var("ORCHER_API_KEY", "key-from-env");

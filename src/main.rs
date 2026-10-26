@@ -85,6 +85,7 @@ async fn main() {
     // dispatch propagates it directly (no wrapping) so the message stays clean.
     let result: error::Result<()> = match cli.command {
         Commands::New { resource } => commands::new::execute(resource, &global_config).await,
+        Commands::ApiKey(cmd) => commands::api_key::execute(cmd, &global_config).await,
         Commands::Batch(cmd) => commands::batch::execute(cmd, &global_config).await,
         Commands::Workflow(cmd) => commands::workflow::execute(cmd, &global_config).await,
         Commands::Namespace(cmd) => commands::namespace::execute(cmd, &global_config).await,

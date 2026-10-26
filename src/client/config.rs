@@ -182,7 +182,7 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            base_url: "http://localhost:8000".parse().unwrap(),
+            base_url: "http://localhost:8080".parse().unwrap(),
             tls: TlsConfig::default(),
             http: HttpConfig::default(),
             api_version: "v1".to_string(),
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn test_client_config_default() {
         let config = ClientConfig::default();
-        assert_eq!(config.base_url.as_str(), "http://localhost:8000/");
+        assert_eq!(config.base_url.as_str(), "http://localhost:8080/");
         assert_eq!(config.api_version, "v1");
         assert!(config.tls.verify_certificates);
         assert!(!config.debug);
@@ -473,7 +473,7 @@ mod tests {
     fn test_api_url_building() {
         let config = ClientConfig::default();
         let url = config.api_url("/workflows").unwrap();
-        assert_eq!(url.as_str(), "http://localhost:8000/api/v1/workflows");
+        assert_eq!(url.as_str(), "http://localhost:8080/api/v1/workflows");
     }
 
     #[test]
