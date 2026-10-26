@@ -62,7 +62,7 @@ pub struct Cli {
     #[arg(long, global = true, env = "ORCHER_SERVER")]
     pub server: Option<String>,
 
-    /// Gateway URL (HTTP, for a cloud deployment) - overrides context config
+    /// REST API URL (the engine's HTTP port, or a cloud gateway) - overrides context config
     #[arg(long, global = true, env = "ORCHER_API_URL")]
     pub api_url: Option<String>,
 
@@ -86,6 +86,10 @@ pub enum Commands {
     /// Manage namespaces (admin)
     #[command(aliases = ["ns"])]
     Namespace(commands::namespace::NamespaceCommand),
+
+    /// Issue, list and revoke the engine's API keys
+    #[command(name = "api-key", aliases = ["api-keys", "key", "keys"])]
+    ApiKey(commands::api_key::ApiKeyCommand),
 
     /// Perform bulk operations on matching workflows
     Batch(commands::batch::BatchCommand),

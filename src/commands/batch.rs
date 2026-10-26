@@ -420,6 +420,7 @@ mod tests {
             .with_body(r#"{"batchOperations":[{"id":"b1","operationType":"cancel","status":"completed","processedCount":2,"totalCount":2}]}"#)
             .create_async()
             .await;
+        let _env = crate::client::CREDENTIAL_ENV.lock().await;
         std::env::set_var("ORCHER_TOKEN", "token-1");
         let result = execute(
             BatchCommand {

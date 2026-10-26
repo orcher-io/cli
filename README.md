@@ -99,7 +99,8 @@ orcher logs order-1001 --follow            # its log, until it ends
 | `orcher status` | A dashboard: where the CLI points, what answers, and workflow counts |
 | `orcher queue list\|stats` | Workflows by task queue |
 | `orcher namespace ...` | `list`, `get`, `create`, `update`, `deprecate`, `delete` |
-| `orcher batch ...` | Cancel, terminate, signal or reset many workflows at once, through a gateway |
+| `orcher api-key create\|list\|get\|revoke` | The engine's API keys: issue one with `--scope` (printed once), list, revoke at once |
+| `orcher batch ...` | Cancel, terminate, signal or reset many workflows at once, over the REST API |
 | `orcher auth login\|logout\|status` | Log in to ORCHER Cloud (browser device flow, token, or password) |
 | `orcher config ...` | Contexts: `get-contexts`, `use-context`, `set-context`, `view`, `test-connection` |
 | `orcher new python\|typescript\|rust <name>` | A new project on the published SDK: a workflow, a task, a worker, a starter and an end-to-end test |
@@ -116,7 +117,7 @@ Run `orcher <command> --help` for every flag and more examples.
 | Flag | Environment | Default | |
 |------|-------------|---------|---|
 | `--server` | `ORCHER_SERVER` | the context's, else `http://localhost:50051` | The engine's gRPC address; `https://` uses TLS |
-| `--api-url` | `ORCHER_API_URL` | the context's `api`, if any | A gateway's HTTP address: login, batch operations, log streaming |
+| `--api-url` | `ORCHER_API_URL` | the context's `api`, else the `--server` host on port 8080 | The REST API: the engine's HTTP port, or a cloud gateway. API keys, batch operations, log streaming, login |
 | `--context` | `ORCHER_CONTEXT` | the current context | A named environment from the config file |
 | `--config` | `ORCHER_CONFIG` | `~/.orcher/config.yaml` | The config file |
 | `-n`, `--namespace` | `ORCHER_NAMESPACE` | `default` | The namespace to act in |
