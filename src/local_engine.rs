@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The engine release run unless another is asked for.
-pub const DEFAULT_ENGINE_VERSION: &str = "0.5.5";
+pub const DEFAULT_ENGINE_VERSION: &str = "0.6.2";
 pub const ENGINE_REPOSITORY: &str = "ghcr.io/orcher-io/orcher";
 const POSTGRES_IMAGE: &str = "postgres:17-alpine";
 
