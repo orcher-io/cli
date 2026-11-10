@@ -42,6 +42,9 @@ const LOCAL_DATABASE_URL: &str = "postgresql://orcher:orcher@orcher-dev-postgres
 
 const POLL: Duration = Duration::from_millis(500);
 
+/// The engine's switch for its dashboard (engine 0.7.0 and later).
+const UI_ENABLED: &str = "ORCHER_UI_ENABLED";
+
 /// How to run the engine.
 #[derive(Debug, Clone)]
 pub struct EngineOptions {
@@ -61,6 +64,9 @@ pub struct EngineOptions {
     pub database_url: Option<String>,
     /// An engine config file (TOML), mounted read-only.
     pub config_file: Option<PathBuf>,
+    /// Serve the dashboard on the HTTP port. Engines from 0.7.0 have one;
+    /// false starts the engine with ORCHER_UI_ENABLED=false.
+    pub ui: bool,
 }
 
 impl EngineOptions {
@@ -86,12 +92,25 @@ pub async fn start(opts: &EngineOptions, quiet: bool) -> Result<()> {
             if engine.image == opts.image
                 && engine.grpc_port == Some(opts.grpc_port)
                 && engine.http_port == Some(opts.http_port)
+                && engine.ui == opts.ui
             {
                 say(format!(
                     "The local engine is already running ({}).",
                     opts.image
                 ));
                 return wait_healthy_or_explain(opts.timeout).await;
+            }
+            if engine.image == opts.image
+                && engine.grpc_port == Some(opts.grpc_port)
+                && engine.http_port == Some(opts.http_port)
+            {
+                return Err(CliError::local_engine(format!(
+                    "A local engine is already running {}, with the dashboard {}.\n  \
+                     Stop it first with `orcher dev stop` to start it with the dashboard {}.",
+                    engine.image,
+                    if engine.ui { "on" } else { "off" },
+                    if opts.ui { "on" } else { "off" },
+                )));
             }
             return Err(CliError::local_engine(format!(
                 "A local engine is already running {} with gRPC on port {}.\n  \
@@ -276,6 +295,7 @@ fn options_from_inspect(value: &serde_json::Value) -> EngineOptions {
         timeout: Duration::from_secs(120),
         database_url: env("DATABASE_URL").filter(|url| url != LOCAL_DATABASE_URL),
         config_file,
+        ui: container.ui,
     }
 }
 
@@ -286,7 +306,11 @@ pub fn status() -> Result<(Option<Container>, Option<Container>)> {
 }
 
 /// The local engine's state as JSON, for `-o json`.
-pub fn status_json(engine: Option<&Container>, postgres: Option<&Container>) -> serde_json::Value {
+pub fn status_json(
+    engine: Option<&Container>,
+    postgres: Option<&Container>,
+    dashboard: Option<&str>,
+) -> serde_json::Value {
     serde_json::json!({
         "engine": engine.map(|e| serde_json::json!({
             "state": e.state_word(),
@@ -294,6 +318,7 @@ pub fn status_json(engine: Option<&Container>, postgres: Option<&Container>) -> 
             "version": e.version,
             "grpcPort": e.grpc_port,
             "httpPort": e.http_port,
+            "dashboard": dashboard,
         })),
         "postgres": postgres.map(|p| serde_json::json!({
             "state": p.state_word(),
@@ -303,7 +328,11 @@ pub fn status_json(engine: Option<&Container>, postgres: Option<&Container>) -> 
 }
 
 /// Prints the local engine's state for people.
-pub fn print_status(engine: Option<&Container>, postgres: Option<&Container>) {
+pub fn print_status(
+    engine: Option<&Container>,
+    postgres: Option<&Container>,
+    dashboard: Option<&str>,
+) {
     let Some(engine) = engine else {
         println!("The local engine is not running. Start it with `orcher dev start`.");
         return;
@@ -315,6 +344,9 @@ pub fn print_status(engine: Option<&Container>, postgres: Option<&Container>) {
     if let Some(port) = engine.grpc_port {
         field("gRPC", format!("http://localhost:{port}"));
     }
+    if let Some(url) = dashboard {
+        field("Dashboard", url.to_string());
+    }
     if let Some(port) = engine.http_port {
         field("Health", format!("http://localhost:{port}/health/ready"));
     }
@@ -325,7 +357,10 @@ pub fn print_status(engine: Option<&Container>, postgres: Option<&Container>) {
 }
 
 /// What to say after a start: where the engine is and what it is.
-pub fn print_started(opts: &EngineOptions) {
+pub fn print_started(opts: &EngineOptions, dashboard: Option<&str>) {
+    if opts.ui && dashboard.is_none() {
+        eprintln!("\nThis engine serves no dashboard: engines from 0.7.0 do.");
+    }
     if opts.grpc_port != ENGINE_GRPC_PORT {
         eprintln!(
             "\nPoint the CLI and your workers at it:\n  export ORCHER_SERVER=http://localhost:{}",
@@ -389,6 +424,9 @@ fn engine_create_args(opts: &EngineOptions) -> Result<Vec<String>> {
     // refuses unless a config file turns authentication on.
     if is_loopback_host(&opts.bind_host) {
         env.push("ORCHER_INSECURE=true".to_string());
+    }
+    if !opts.ui {
+        env.push(format!("{UI_ENABLED}=false"));
     }
     if let Some(file) = &opts.config_file {
         let file = absolute(file)?;
@@ -557,6 +595,10 @@ pub struct Container {
     pub version: Option<String>,
     pub grpc_port: Option<u16>,
     pub http_port: Option<u16>,
+    /// The host address the HTTP port is published on.
+    pub http_host: Option<String>,
+    /// False when the engine was started with its dashboard turned off.
+    pub ui: bool,
 }
 
 impl Container {
@@ -577,7 +619,46 @@ impl Container {
                 .map(str::to_string),
             grpc_port: host_port(ENGINE_GRPC_PORT),
             http_port: host_port(ENGINE_HTTP_PORT),
+            http_host: value["HostConfig"]["PortBindings"][format!("{ENGINE_HTTP_PORT}/tcp")][0]
+                ["HostIp"]
+                .as_str()
+                .filter(|h| !h.is_empty())
+                .map(str::to_string),
+            ui: !value["Config"]["Env"].as_array().is_some_and(|vars| {
+                vars.iter()
+                    .any(|v| v.as_str() == Some(&format!("{UI_ENABLED}=false")))
+            }),
         }
+    }
+
+    /// Where the engine's dashboard is, if it serves one: its HTTP port
+    /// answers `/` with a page. Engines before 0.7.0 have none, and one
+    /// started with the dashboard off answers 404.
+    pub async fn dashboard(&self) -> Option<String> {
+        if !self.running || !self.ui {
+            return None;
+        }
+        let port = self.http_port?;
+        // Published on every interface, the engine is reachable on this
+        // machine's loopback; on one address, only there.
+        let host = match self.http_host.as_deref() {
+            None | Some("0.0.0.0") | Some("::") | Some("127.0.0.1") => "localhost".to_string(),
+            Some(h) if h.contains(':') => format!("[{h}]"),
+            Some(h) => h.to_string(),
+        };
+        let url = format!("http://{host}:{port}");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .ok()?;
+        let response = client.get(format!("{url}/")).send().await.ok()?;
+        let page = response.status().is_success()
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.starts_with("text/html"));
+        page.then_some(url)
     }
 
     /// "ready", "starting", "unhealthy", or Docker's state when stopped.
@@ -671,6 +752,7 @@ mod tests {
             timeout: Duration::from_secs(120),
             database_url: None,
             config_file: None,
+            ui: true,
         }
     }
 
@@ -807,6 +889,89 @@ mod tests {
             "the local database is not external"
         );
         assert_eq!(opts.config_file, Some(PathBuf::from("/home/me/auth.toml")));
+    }
+
+    #[test]
+    fn the_dashboard_is_turned_off_only_when_asked() {
+        let mut opts = options();
+        let on = engine_create_args(&opts).unwrap().join(" ");
+        assert!(!on.contains(UI_ENABLED), "{on}");
+        opts.ui = false;
+        let off = engine_create_args(&opts).unwrap().join(" ");
+        assert!(off.contains("--env ORCHER_UI_ENABLED=false"), "{off}");
+    }
+
+    /// A restart, and `start` deciding whether the same engine is already up,
+    /// read the dashboard setting back from the container.
+    #[test]
+    fn the_dashboard_setting_is_read_back() {
+        let engine = |env: Vec<&str>| {
+            serde_json::json!({
+                "State": {"Status": "running", "Running": true},
+                "Config": {"Image": "ghcr.io/orcher-io/orcher:0.7.0", "Env": env},
+                "HostConfig": {"PortBindings": {
+                    "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8081"}]
+                }}
+            })
+        };
+        let on = engine(vec!["LOG_LEVEL=info"]);
+        assert!(Container::from_inspect(&on).ui);
+        assert!(options_from_inspect(&on).ui);
+        let off = engine(vec!["LOG_LEVEL=info", "ORCHER_UI_ENABLED=false"]);
+        assert!(!Container::from_inspect(&off).ui);
+        assert!(!options_from_inspect(&off).ui);
+        assert_eq!(
+            Container::from_inspect(&off).http_host.as_deref(),
+            Some("127.0.0.1")
+        );
+    }
+
+    /// One HTTP response from a listener on a free port, as the engine's HTTP
+    /// port would give it; returns the container that publishes that port.
+    async fn engine_answering(status: &str, content_type: &str) -> Container {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+        );
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        Container::from_inspect(&serde_json::json!({
+            "State": {"Status": "running", "Running": true},
+            "Config": {"Image": "ghcr.io/orcher-io/orcher:0.7.0", "Env": []},
+            "HostConfig": {"PortBindings": {
+                "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": port.to_string()}]
+            }}
+        }))
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_is_where_the_http_port_answers_with_a_page() {
+        let engine = engine_answering("200 OK", "text/html; charset=utf-8").await;
+        let port = engine.http_port.unwrap();
+        assert_eq!(
+            engine.dashboard().await,
+            Some(format!("http://localhost:{port}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn no_dashboard_where_the_http_port_has_no_page() {
+        // An engine before 0.7.0, or one started with the dashboard off
+        let engine = engine_answering("404 Not Found", "text/plain").await;
+        assert_eq!(engine.dashboard().await, None);
+        // A page that is not one, such as JSON from a proxy
+        let engine = engine_answering("200 OK", "application/json").await;
+        assert_eq!(engine.dashboard().await, None);
+        // Turned off: not even asked
+        let mut engine = engine_answering("200 OK", "text/html").await;
+        engine.ui = false;
+        assert_eq!(engine.dashboard().await, None);
     }
 
     #[test]
