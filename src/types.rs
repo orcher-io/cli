@@ -222,6 +222,14 @@ pub enum DevCommands {
         /// Seconds to wait for the engine to become ready
         #[arg(long, default_value = "120")]
         timeout: u64,
+
+        /// Open the dashboard in a browser once the engine is ready
+        #[arg(long)]
+        open: bool,
+
+        /// Start the engine without its dashboard
+        #[arg(long)]
+        no_ui: bool,
     },
 
     /// Stop the local engine

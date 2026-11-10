@@ -82,6 +82,10 @@ pub enum ServerCommands {
         /// Seconds to wait for the engine to become ready
         #[arg(long, default_value = "120")]
         timeout: u64,
+
+        /// Start the engine without its dashboard
+        #[arg(long)]
+        no_ui: bool,
     },
 
     /// Stop the local engine
@@ -176,6 +180,7 @@ pub async fn execute(cmd: ServerCommand, global_config: &GlobalConfig) -> Result
             engine_version,
             image,
             timeout,
+            no_ui,
         } => {
             warn_unused(grpc_only || http_only, redis_url.is_some());
             if let (Some(url), false) = (&database_url, global_config.quiet) {
@@ -190,8 +195,9 @@ pub async fn execute(cmd: ServerCommand, global_config: &GlobalConfig) -> Result
                 timeout: Duration::from_secs(timeout),
                 database_url,
                 config_file: engine_config,
+                ui: !no_ui,
             };
-            crate::commands::dev::start(&opts, global_config).await?;
+            crate::commands::dev::start(&opts, global_config, false).await?;
             if foreground {
                 local_engine::logs(true, "0", false)?;
             }
@@ -515,7 +521,7 @@ async fn restart_server(force: bool, global_config: &GlobalConfig) -> Result<()>
     })?;
     let graceful = (!force).then(|| Duration::from_secs(30));
     local_engine::stop(false, graceful)?;
-    crate::commands::dev::start(&opts, global_config).await
+    crate::commands::dev::start(&opts, global_config, false).await
 }
 
 /// Prints the CLI's version, the local engine's, and whether the engine and

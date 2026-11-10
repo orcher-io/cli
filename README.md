@@ -128,6 +128,8 @@ Run `orcher <command> --help` for every flag and more examples.
 
 The local engine's ports are bound to `127.0.0.1`: it runs without authentication unless its config file turns it on. Published anywhere else (`--host 0.0.0.0`), a current engine refuses to start without authentication, so turn it on in the file given with `--config`. `orcher dev start` and `orcher server start` take `--engine-version` (default `0.6.2`) to run another engine release, and other ports when the defaults, 50051 and 8080, are taken.
 
+Engines from 0.7.0 serve the dashboard on the HTTP port: `orcher dev start` lists it as `Dashboard  http://localhost:8080` (and `orcher dev status -o json` as `engine.dashboard`), `--open` opens it in a browser, and `--no-ui` starts the engine without it. It asks for no login while the engine runs without authentication.
+
 A command that fails prints the reason to stderr and exits with status 1; so do `workflow result` and `run` for a workflow that failed, was canceled or terminated, or did not finish in time. Commands that would stop or delete something ask first; pass `--force` when there is no terminal to ask on.
 
 <br />

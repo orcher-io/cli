@@ -142,6 +142,14 @@ check "start again is a no-op" 0 - -- dev start -q "${DEV_PORTS[@]}"
 check "start on other ports while running is refused" 1 "err:already running" -- dev start --port $((GRPC_PORT + 10)) --http-port $((HTTP_PORT + 10))
 check "engine log" 0 "out:INFO" -- dev logs --tail 20
 if curl -fsS "http://localhost:$HTTP_PORT/health/ready" >/dev/null; then pass "health/ready answers"; else STATUS=$?; : >"$WORK/out"; : >"$WORK/err"; fail "health/ready answers"; fi
+# The dashboard: engines from 0.7.0 serve it on the HTTP port, earlier ones none.
+if [ "$(printf '%s\n0.7.0\n' "$ENGINE_VERSION" | sort -V | head -1)" = "0.7.0" ]; then
+  check "status names the dashboard" 0 'jq:.engine.dashboard == "http://localhost:'"$HTTP_PORT"'"' -- dev status -o json
+  check "the status table shows the dashboard" 0 "out:Dashboard" -- dev status
+else
+  check "no dashboard before engine 0.7.0" 0 'jq:.engine.dashboard == null' -- dev status -o json
+fi
+check "the dashboard setting is part of which engine is running" 1 "err:with the dashboard on" -- dev start "${DEV_PORTS[@]}" --no-ui
 
 echo "== server"
 check "server status: engine healthy, no gateway configured" 0 'jq:.services.orchestrator.overall_healthy and .services.orchestrator.grpc.healthy and .services.orchestrator.http.healthy and (.services.gateway.configured | not) and .all_healthy' -- server status -o json
