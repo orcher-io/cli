@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/orcher-io/cli/compare/v0.1.2...v0.1.3) (2026-11-10)
+
+
+### Features
+
+* **dev:** show the engine's dashboard, open it, or turn it off ([#23](https://github.com/orcher-io/cli/issues/23)) ([ce273ec](https://github.com/orcher-io/cli/commit/ce273ec7cdc9612a19a1556c6004ec74ebf249b0))
+
 ## [0.1.2](https://github.com/orcher-io/cli/compare/v0.1.1...v0.1.2) (2026-10-26)
 
 
