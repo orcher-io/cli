@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/orcher-io/cli/compare/v0.1.3...v0.1.4) (2026-11-11)
+
+
+### Bug Fixes
+
+* **release:** build Apple silicon on macos-15 ([#25](https://github.com/orcher-io/cli/issues/25)) ([567bf1d](https://github.com/orcher-io/cli/commit/567bf1d8bb9441789f7c6784314bf1468425ee1c))
+
 ## [0.1.3](https://github.com/orcher-io/cli/compare/v0.1.2...v0.1.3) (2026-11-10)
 
 
