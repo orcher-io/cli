@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The engine release run unless another is asked for.
-pub const DEFAULT_ENGINE_VERSION: &str = "0.6.2";
+pub const DEFAULT_ENGINE_VERSION: &str = "0.7.0";
 pub const ENGINE_REPOSITORY: &str = "ghcr.io/orcher-io/orcher";
 const POSTGRES_IMAGE: &str = "postgres:17-alpine";
 
@@ -369,8 +369,7 @@ pub fn print_started(opts: &EngineOptions, dashboard: Option<&str>) {
     }
     eprintln!(
         "\n{}",
-        style("The engine image is a free developer preview, for development and evaluation.")
-            .dim()
+        style("The engine is open source under the Apache License 2.0.").dim()
     );
 }
 
