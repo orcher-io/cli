@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/orcher-io/cli/compare/v0.1.4...v0.1.5) (2026-11-12)
+
+
+### Features
+
+* run engine 0.7.0 by default, and say it is Apache-2.0 ([#27](https://github.com/orcher-io/cli/issues/27)) ([c9f12ef](https://github.com/orcher-io/cli/commit/c9f12ef4783e2667c296a6d5a2292ddf99319a09))
+
 ## [0.1.4](https://github.com/orcher-io/cli/compare/v0.1.3...v0.1.4) (2026-11-11)
 
 
