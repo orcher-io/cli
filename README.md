@@ -13,6 +13,7 @@
 <div>
   <a href="https://github.com/orcher-io/cli/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/orcher-io/cli/ci.yml?branch=main&style=flat-square&labelColor=0a0a0a&color=04B385&logo=github&logoColor=white&label=CI" alt="CI"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-38BDF0?style=flat-square&labelColor=0a0a0a" alt="Apache 2.0"></a>
+  <a href="https://docs.orcher.io"><img src="https://img.shields.io/badge/docs-docs.orcher.io-04B385?style=flat-square&labelColor=0a0a0a" alt="docs"></a>
 </div>
 
 <br />
