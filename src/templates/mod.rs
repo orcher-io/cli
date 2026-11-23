@@ -272,7 +272,7 @@ mod tests {
             .unwrap();
         let cargo = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
         assert!(cargo.contains("name = \"my-app\""));
-        assert!(cargo.contains("orcher-sdk = \"0.5\""));
+        assert!(cargo.contains("orcher-sdk = \"0.18\""));
         assert!(!cargo.contains("path ="), "no path dependencies");
 
         let dir = TempDir::new().unwrap();
@@ -282,14 +282,14 @@ mod tests {
         let package = std::fs::read_to_string(dir.path().join("package.json")).unwrap();
         let package: serde_json::Value = serde_json::from_str(&package).unwrap();
         assert_eq!(package["name"], "my-app");
-        assert!(package["dependencies"]["@orcher/sdk"].is_string());
+        assert_eq!(package["dependencies"]["@orcher/sdk"], "^0.5.21");
 
         let dir = TempDir::new().unwrap();
         engine
             .generate_project("python", &context("my-app"), dir.path())
             .unwrap();
         let requirements = std::fs::read_to_string(dir.path().join("requirements.txt")).unwrap();
-        assert!(requirements.starts_with("orcher-sdk"));
+        assert!(requirements.starts_with("orcher-sdk>=0.5.0,<0.6"));
         let settings = std::fs::read_to_string(dir.path().join("settings.py")).unwrap();
         assert!(settings.contains("TASK_QUEUE = \"my-app\""));
     }

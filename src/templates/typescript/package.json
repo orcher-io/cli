@@ -13,7 +13,7 @@
     "test": "npm run build && node dist/test.js"
   },
   "dependencies": {
-    "@orcher/sdk": "^0.5.1"
+    "@orcher/sdk": "^0.5.21"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
