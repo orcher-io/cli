@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.5](https://github.com/orcher-io/cli/compare/v0.1.4...v0.1.5) (2026-11-24)
+
+
+### Features
+
+* run engine 0.7.0 by default, and say it is Apache-2.0 ([#27](https://github.com/orcher-io/cli/issues/27)) ([c9f12ef](https://github.com/orcher-io/cli/commit/c9f12ef4783e2667c296a6d5a2292ddf99319a09))
+
+
+### Bug Fixes
+
+* **new:** generate projects on the current SDK releases ([#34](https://github.com/orcher-io/cli/issues/34)) ([cd715aa](https://github.com/orcher-io/cli/commit/cd715aa556c3cb58c5b94716c0030f4bddd800fd)), closes [#31](https://github.com/orcher-io/cli/issues/31)
+
+
+### Documentation
+
+* link the documentation site from the README ([#30](https://github.com/orcher-io/cli/issues/30)) ([ac77815](https://github.com/orcher-io/cli/commit/ac778151c748a1641f357debd80a2f95eafef257))
+
 ## [0.1.4](https://github.com/orcher-io/cli/compare/v0.1.3...v0.1.4) (2026-11-11)
 
 
