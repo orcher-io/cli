@@ -1,6 +1,6 @@
 // The starter: start the hello workflow and wait for its result.
 //
-//   npm run start-workflow -- Ada
+//   npm run start-workflow -- world
 import { randomUUID } from 'node:crypto';
 import { Client } from '@orcher/sdk';
 import { API_KEY, NAMESPACE, SERVER_URL, TASK_QUEUE } from './settings';

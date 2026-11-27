@@ -5,7 +5,7 @@ An ORCHER project in Rust: a `hello` workflow that runs a `greet` task.
 ```bash
 orcher dev start                 # a local engine, if you have none
 cargo run -- worker              # the worker, in one terminal
-cargo run -- start Ada           # start the workflow, in another
+cargo run -- start world         # start the workflow, in another
 orcher test                      # run it end to end
 ```
 
