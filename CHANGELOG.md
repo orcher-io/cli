@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/orcher-io/cli/compare/v0.1.5...v0.1.6) (2026-11-27)
+
+
+### Features
+
+* **new:** a new project says Hello, world! ([#36](https://github.com/orcher-io/cli/issues/36)) ([4253d93](https://github.com/orcher-io/cli/commit/4253d935b071be2055f5d71bcb16f91fc1815ee9))
+
 ## [0.1.5](https://github.com/orcher-io/cli/compare/v0.1.4...v0.1.5) (2026-11-24)
 
 
