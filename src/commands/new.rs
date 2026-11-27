@@ -171,7 +171,7 @@ async fn create_project(
         println!();
         println!("Then start workflows from anywhere:");
         println!(
-            "  orcher workflow start hello --task-queue {} --input '\"Ada\"' --wait",
+            "  orcher workflow start hello --task-queue {} --input '\"world\"' --wait",
             name
         );
     }

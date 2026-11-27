@@ -1,7 +1,7 @@
 //! {{project_name}}: run the worker, or start the hello workflow.
 //!
 //!   cargo run -- worker          run the workflows and tasks until stopped
-//!   cargo run -- start Ada       start `hello` and print its result
+//!   cargo run -- start world     start `hello` and print its result
 //!   orcher test                  run it end to end (or: cargo test)
 
 mod workflows;

@@ -6,7 +6,7 @@ An ORCHER project in Python: a `hello` workflow that runs a `greet` task.
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 orcher dev start                 # a local engine, if you have none
 .venv/bin/python worker.py       # the worker, in one terminal
-.venv/bin/python start.py Ada    # start the workflow, in another
+.venv/bin/python start.py world  # start the workflow, in another
 orcher test                      # run it end to end
 ```
 

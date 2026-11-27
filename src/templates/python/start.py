@@ -1,6 +1,6 @@
 """The starter: start the hello workflow and wait for its result.
 
-    python start.py Ada
+    python start.py world
 """
 
 import asyncio

@@ -6,7 +6,7 @@ An ORCHER project in TypeScript: a `hello` workflow that runs a `greet` task.
 npm install && npm run build
 orcher dev start                 # a local engine, if you have none
 npm run worker                   # the worker, in one terminal
-npm run start-workflow -- Ada    # start the workflow, in another
+npm run start-workflow -- world  # start the workflow, in another
 orcher test                      # run it end to end
 ```
 
